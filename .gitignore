@@ -31,10 +31,13 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript
 *.tsbuildinfo
+.territory-test-build/
+.paintfoot-server-data/
 
 example
 

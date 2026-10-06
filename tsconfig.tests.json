@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "rootDir": ".",
+    "outDir": ".territory-test-build"
+  },
+  "include": [
+    "src/config/territory.ts",
+    "src/types/game.ts",
+    "src/utils/debug-log.ts",
+    "src/utils/geo.ts",
+    "src/services/sensor-metrics.ts",
+    "src/services/sensor-capability-logic.ts",
+    "src/services/sensor-fusion.ts",
+    "src/services/road-matching.ts",
+    "src/services/territory-detection.ts",
+    "src/services/territory-shields.ts",
+    "src/services/offline-validation.ts",
+    "tests/territory-detection.test.ts",
+    "tests/sensor-metrics.test.ts",
+    "tests/sensor-capability-logic.test.ts",
+    "tests/sensor-fusion.test.ts",
+    "tests/road-matching.test.ts",
+    "tests/territory-shields.test.ts",
+    "tests/offline-validation.test.ts"
+  ]
+}

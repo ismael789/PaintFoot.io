@@ -1,180 +1,205 @@
-import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
-import { Platform, Pressable, ScrollView, StyleSheet } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Constants from "expo-constants";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { ExternalLink } from '@/components/external-link';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Collapsible } from '@/components/ui/collapsible';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import {
+  SENSOR_CATEGORIES,
+  sensorCapabilityManager,
+  type SensorCapabilityState,
+  type SensorOperationalStatus,
+} from "@/services/sensor-capabilities";
 
-export default function TabTwoScreen() {
-  const safeAreaInsets = useSafeAreaInsets();
-  const insets = {
-    ...safeAreaInsets,
-    bottom: safeAreaInsets.bottom + BottomTabInset + Spacing.three,
-  };
-  const theme = useTheme();
+const STATUS_PRESENTATION: Record<
+  SensorOperationalStatus,
+  { icon: string; label: string; color: string }
+> = {
+  checking: { icon: "⚪", label: "Comprobando", color: "#8A94A6" },
+  available: { icon: "⚪", label: "Disponible / Inactivo", color: "#8A94A6" },
+  active: { icon: "🟢", label: "Activo", color: "#2E9B52" },
+  unavailable: { icon: "❌", label: "No disponible en este dispositivo", color: "#C94141" },
+  "temporarily-unavailable": { icon: "⚠️", label: "No disponible temporalmente", color: "#E58B18" },
+  "apk-only": { icon: "📱", label: "Solo APK Android", color: "#536DFE" },
+  "low-accuracy": { icon: "⚠️", label: "Precision baja", color: "#E58B18" },
+  interference: { icon: "⚠️", label: "Interferencia", color: "#E58B18" },
+};
 
-  const contentPlatformStyle = Platform.select({
-    android: {
-      paddingTop: insets.top,
-      paddingLeft: insets.left,
-      paddingRight: insets.right,
-      paddingBottom: insets.bottom,
-    },
-    web: {
-      paddingTop: Spacing.six,
-      paddingBottom: Spacing.four,
-    },
-  });
+function SensorRow({ sensor }: { sensor: SensorCapabilityState }) {
+  const presentation = STATUS_PRESENTATION[sensor.status];
+  return (
+    <View style={styles.sensorRow}>
+      <Text style={styles.sensorIcon}>{presentation.icon}</Text>
+      <View style={styles.sensorContent}>
+        <View style={styles.sensorTitleRow}>
+          <Text style={styles.sensorName}>{sensor.name}</Text>
+          {sensor.value && <Text style={styles.sensorValue}>{sensor.value}</Text>}
+        </View>
+        <Text style={[styles.sensorStatus, { color: presentation.color }]}>
+          {presentation.label}
+        </Text>
+        <Text style={styles.sensorPurpose}>{sensor.purpose}</Text>
+        {sensor.details?.name && (
+          <Text style={styles.sensorDetails}>
+            {sensor.details.name} · {sensor.details.vendor}
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+}
+
+export default function DeviceSensorsScreen() {
+  const insets = useSafeAreaInsets();
+  const sensors = useSyncExternalStore(
+    sensorCapabilityManager.subscribe,
+    sensorCapabilityManager.getSnapshot,
+    sensorCapabilityManager.getSnapshot,
+  );
+  const [refreshing, setRefreshing] = useState(false);
+  const isExpoGo = Constants.expoGoConfig !== null;
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await sensorCapabilityManager.refresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const availableCount = sensors.filter(
+    (sensor) => sensor.available === true,
+  ).length;
+  const activeCount = sensors.filter((sensor) => sensor.active).length;
+  const unavailableCount = sensors.filter(
+    (sensor) => sensor.available === false,
+  ).length;
+  const apkOnlyCount = sensors.filter(
+    (sensor) => sensor.status === "apk-only",
+  ).length;
+  const interferenceCount = sensors.filter(
+    (sensor) => sensor.status === "interference",
+  ).length;
+  const gpsAvailable = sensors.find((sensor) => sensor.id === "gps")?.available;
+  const confidence = sensorCapabilityManager.getConfidence();
 
   return (
     <ScrollView
-      style={[styles.scrollView, { backgroundColor: theme.background }]}
-      contentInset={insets}
-      contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
-      <ThemedView style={styles.container}>
-        <ThemedView style={styles.titleContainer}>
-          <ThemedText type="subtitle">Explore</ThemedText>
-          <ThemedText style={styles.centerText} themeColor="textSecondary">
-            This starter app includes example{'\n'}code to help you get started.
-          </ThemedText>
+      style={styles.screen}
+      contentContainerStyle={[
+        styles.content,
+        { paddingTop: insets.top + 18, paddingBottom: insets.bottom + 110 },
+      ]}
+    >
+      <View style={styles.header}>
+        <View style={styles.headerText}>
+          <Text style={styles.title}>Sensores del dispositivo</Text>
+          <Text style={styles.subtitle}>
+            Deteccion real del hardware y estado del seguimiento
+          </Text>
+        </View>
+        <Pressable style={styles.refreshButton} onPress={refresh} disabled={refreshing}>
+          {refreshing ? (
+            <ActivityIndicator color="#FFFFFF" size="small" />
+          ) : (
+            <Text style={styles.refreshText}>Actualizar</Text>
+          )}
+        </Pressable>
+      </View>
 
-          <ExternalLink href="https://docs.expo.dev" asChild>
-            <Pressable style={({ pressed }) => pressed && styles.pressed}>
-              <ThemedView type="backgroundElement" style={styles.linkButton}>
-                <ThemedText type="link">Expo documentation</ThemedText>
-                <SymbolView
-                  tintColor={theme.text}
-                  name={{ ios: 'arrow.up.right.square', android: 'link', web: 'link' }}
-                  size={12}
-                />
-              </ThemedView>
-            </Pressable>
-          </ExternalLink>
-        </ThemedView>
+      <View style={styles.summaryCard}>
+        <Text style={styles.summaryTitle}>
+          Sensores disponibles: {availableCount} / {sensors.length}
+        </Text>
+        <Text style={styles.summaryLine}>Sensores activos: {activeCount}</Text>
+        <Text style={styles.summaryLine}>
+          Interferencias: {interferenceCount === 0 ? "Ninguna" : interferenceCount}
+        </Text>
+        <Text style={styles.summaryLine}>
+          Tracking: {confidence === "high" ? "Alta" : confidence === "medium" ? "Media" : "Baja"} confianza
+        </Text>
+        <Text style={[styles.gameStatus, !gpsAvailable && styles.gameStatusWarning]}>
+          {gpsAvailable
+            ? unavailableCount > 0 || apkOnlyCount > 0
+              ? "✅ PaintFoot.io puede funcionar normalmente con los sensores compatibles."
+              : "✅ Juego completamente funcional."
+            : "⚠️ Se necesita GPS para iniciar un recorrido y conquistar territorio."}
+        </Text>
+        {(unavailableCount > 0 || apkOnlyCount > 0) && gpsAvailable && (
+          <Text style={styles.fallbackText}>
+            {unavailableCount + apkOnlyCount} sensores opcionales no estan disponibles en este entorno. Los sensores restantes se utilizan automaticamente.
+          </Text>
+        )}
+        {isExpoGo && apkOnlyCount > 0 && (
+          <Text style={styles.apkNotice}>
+            Los sensores Android nativos se detectan en Development Build o APK. Expo Go no permite cargar el modulo Kotlin personalizado.
+          </Text>
+        )}
+      </View>
 
-        <ThemedView style={styles.sectionsWrapper}>
-          <Collapsible title="File-based routing">
-            <ThemedText type="small">
-              This app has two screens: <ThemedText type="code">src/app/index.tsx</ThemedText> and{' '}
-              <ThemedText type="code">src/app/explore.tsx</ThemedText>
-            </ThemedText>
-            <ThemedText type="small">
-              The layout file in <ThemedText type="code">src/app/_layout.tsx</ThemedText> sets up
-              the tab navigator.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/router/introduction">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+      {SENSOR_CATEGORIES.map((category) => (
+        <View key={category} style={styles.category}>
+          <Text style={styles.categoryTitle}>{category.toUpperCase()}</Text>
+          <View style={styles.card}>
+            {sensors
+              .filter((sensor) => sensor.category === category)
+              .map((sensor) => (
+                <SensorRow key={sensor.id} sensor={sensor} />
+              ))}
+          </View>
+        </View>
+      ))}
 
-          <Collapsible title="Android, iOS, and web support">
-            <ThemedView type="backgroundElement" style={styles.collapsibleContent}>
-              <ThemedText type="small">
-                You can open this project on Android, iOS, and the web. To open the web version,
-                press <ThemedText type="smallBold">w</ThemedText> in the terminal running this
-                project.
-              </ThemedText>
-              <Image
-                source={require('@/assets/images/tutorial-web.png')}
-                style={styles.imageTutorial}
-              />
-            </ThemedView>
-          </Collapsible>
-
-          <Collapsible title="Images">
-            <ThemedText type="small">
-              For static images, you can use the <ThemedText type="code">@2x</ThemedText> and{' '}
-              <ThemedText type="code">@3x</ThemedText> suffixes to provide files for different
-              screen densities.
-            </ThemedText>
-            <Image source={require('@/assets/images/react-logo.png')} style={styles.imageReact} />
-            <ExternalLink href="https://reactnative.dev/docs/images">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
-
-          <Collapsible title="Light and dark mode components">
-            <ThemedText type="small">
-              This template has light and dark mode support. The{' '}
-              <ThemedText type="code">useColorScheme()</ThemedText> hook lets you inspect what the
-              user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
-
-          <Collapsible title="Animations">
-            <ThemedText type="small">
-              This template includes an example of an animated component. The{' '}
-              <ThemedText type="code">src/components/ui/collapsible.tsx</ThemedText> component uses
-              the powerful <ThemedText type="code">react-native-reanimated</ThemedText> library to
-              animate opening this hint.
-            </ThemedText>
-          </Collapsible>
-        </ThemedView>
-        {Platform.OS === 'web' && <WebBadge />}
-      </ThemedView>
+      <View style={styles.explanationCard}>
+        <Text style={styles.explanationTitle}>Dependencias del juego</Text>
+        <Text style={styles.explanationText}>
+          Conquistar requiere GPS, Map Matching, segmentos viales, perimetro completo y un poligono valido. Los demas sensores mejoran movimiento, orientacion, estadisticas y experiencia visual, pero ninguno crea territorio por si solo.
+        </Text>
+      </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  scrollView: {
-    flex: 1,
-  },
-  contentContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-  },
-  container: {
-    maxWidth: MaxContentWidth,
-    flexGrow: 1,
-  },
-  titleContainer: {
-    gap: Spacing.three,
-    alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.six,
-  },
-  centerText: {
-    textAlign: 'center',
-  },
-  pressed: {
-    opacity: 0.7,
-  },
-  linkButton: {
-    flexDirection: 'row',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-    borderRadius: Spacing.five,
-    justifyContent: 'center',
-    gap: Spacing.one,
-    alignItems: 'center',
-  },
-  sectionsWrapper: {
-    gap: Spacing.five,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-  },
-  collapsibleContent: {
-    alignItems: 'center',
-  },
-  imageTutorial: {
-    width: '100%',
-    aspectRatio: 296 / 171,
-    borderRadius: Spacing.three,
-    marginTop: Spacing.two,
-  },
-  imageReact: {
-    width: 100,
-    height: 100,
-    alignSelf: 'center',
-  },
+  screen: { flex: 1, backgroundColor: "#101426" },
+  content: { paddingHorizontal: 16, gap: 18 },
+  header: { flexDirection: "row", alignItems: "center", gap: 12 },
+  headerText: { flex: 1 },
+  title: { color: "#FFFFFF", fontSize: 24, fontWeight: "800" },
+  subtitle: { color: "#AAB2CF", fontSize: 13, marginTop: 4 },
+  refreshButton: { backgroundColor: "#3949AB", borderRadius: 10, minWidth: 92, paddingHorizontal: 12, paddingVertical: 10, alignItems: "center" },
+  refreshText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
+  summaryCard: { backgroundColor: "#1A1A2E", borderRadius: 18, padding: 16, gap: 6 },
+  summaryTitle: { color: "#FFFFFF", fontSize: 18, fontWeight: "800" },
+  summaryLine: { color: "#C5CAE9", fontSize: 13 },
+  gameStatus: { color: "#7EE29A", fontSize: 13, fontWeight: "700", marginTop: 6, lineHeight: 19 },
+  gameStatusWarning: { color: "#FFBF69" },
+  fallbackText: { color: "#C5CAE9", fontSize: 12, lineHeight: 18 },
+  apkNotice: { color: "#9FA8FF", fontSize: 12, lineHeight: 18, marginTop: 4 },
+  category: { gap: 8 },
+  categoryTitle: { color: "#9FA8DA", fontSize: 12, fontWeight: "800", letterSpacing: 1.1 },
+  card: { backgroundColor: "#1A1A2E", borderRadius: 16, overflow: "hidden" },
+  sensorRow: { flexDirection: "row", padding: 14, gap: 10, borderBottomColor: "#292B46", borderBottomWidth: StyleSheet.hairlineWidth },
+  sensorIcon: { fontSize: 16, width: 24 },
+  sensorContent: { flex: 1, gap: 2 },
+  sensorTitleRow: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
+  sensorName: { color: "#FFFFFF", fontSize: 14, fontWeight: "700", flex: 1 },
+  sensorValue: { color: "#80CBC4", fontSize: 12, fontWeight: "700" },
+  sensorStatus: { fontSize: 12, fontWeight: "700" },
+  sensorPurpose: { color: "#AAB2CF", fontSize: 11, lineHeight: 16 },
+  sensorDetails: { color: "#7982A2", fontSize: 10 },
+  explanationCard: { backgroundColor: "#162F33", borderRadius: 16, padding: 15, gap: 5 },
+  explanationTitle: { color: "#80CBC4", fontSize: 14, fontWeight: "800" },
+  explanationText: { color: "#D5E8E6", fontSize: 12, lineHeight: 18 },
 });

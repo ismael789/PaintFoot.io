@@ -1,18 +1,43 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { DarkTheme, DefaultTheme, router, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { useCallback, useEffect, useState } from 'react';
 import { useColorScheme } from 'react-native';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import AppTabs from '@/components/app-tabs';
+import { GameIntro } from '@/components/game-intro';
+import { subscribeToNotificationResponses } from '@/services/push-notifications';
 
 SplashScreen.preventAutoHideAsync();
 
-export default function TabLayout() {
+function AppContent() {
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe: () => void = () => undefined;
+
+    void subscribeToNotificationResponses((url) => router.push(url)).then(
+      (removeListener) => {
+        if (cancelled) removeListener();
+        else unsubscribe = removeListener;
+      },
+    );
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  return <AppTabs />;
+}
+
+export default function RootLayout() {
   const colorScheme = useColorScheme();
+  const [hasStarted, setHasStarted] = useState(false);
+  const enterGame = useCallback(() => setHasStarted(true), []);
+
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
+      {hasStarted ? <AppContent /> : <GameIntro onComplete={enterGame} />}
     </ThemeProvider>
   );
 }

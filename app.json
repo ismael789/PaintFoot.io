@@ -4,19 +4,18 @@
     "slug": "PaintFoot.io",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./Zapatilla geométrica en plena carrera.png",
     "scheme": "paintfootio",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./Zapatilla geométrica en plena carrera.png"
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
-      },
+      "package": "com.paintfootio.app",
+      "permissions": [
+        "android.permission.ACTIVITY_RECOGNITION"
+      ],
+      "icon": "./Zapatilla geométrica en plena carrera.png",
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -26,13 +25,37 @@
     "plugins": [
       "expo-router",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Permite que PaintFoot.io use tu ubicacion durante la partida.",
+          "locationAlwaysAndWhenInUsePermission": "Permite que PaintFoot.io registre tu recorrido incluso con la pantalla bloqueada.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/android-icon-monochrome.png",
+          "color": "#208AEF",
+          "defaultChannel": "game-events"
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Permite que PaintFoot.io use los sensores de movimiento para mejorar el ajuste del recorrido a las calles."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#208AEF",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true,
