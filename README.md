@@ -1,57 +1,78 @@
-# Welcome to your Expo app 👋
+# PaintFoot.io
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Aplicación móvil de conquista de territorios construida con Expo SDK 57 y React Native.
 
-## Get started
+## Preparar el proyecto después de clonarlo
 
-1. Install dependencies
+Requisitos: Node.js, npm y Expo Go o un dispositivo/emulador Android.
 
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```powershell
+git clone https://github.com/ismael789/PaintFoot.io.git
+cd PaintFoot.io
+npm install
+Copy-Item .env.example .env
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+El archivo de configuración local debe llamarse exactamente `.env` y debe estar en la raíz del proyecto, al lado de `package.json`. `.env.example` contiene todas las variables admitidas y explica para qué sirve cada una.
 
-### Other setup steps
+Antes de iniciar, editar `.env` y reemplazar como mínimo:
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+- `EXPO_PUBLIC_WS_URL`: IP local de la computadora y puerto `8082`.
+- `EXPO_PUBLIC_STRIPE_API_URL`: la misma IP local y puerto `4000`.
+- `STRIPE_SECRET_KEY`: clave secreta de prueba entregada de forma privada por el responsable de la cuenta Stripe.
+- `STRIPE_PUBLIC_KEY`: clave pública de prueba de la misma cuenta.
+- Los `STRIPE_SHIELD_*_PRICE_ID` si se usan productos permanentes de Stripe.
+- `STRIPE_WEBHOOK_SECRET` cuando se prueben webhooks con Stripe CLI.
 
-## Learn more
+Ejemplo de direcciones para una computadora cuya IP es `192.168.1.50`:
 
-To learn more about developing your project with Expo, look at the following resources:
+```dotenv
+EXPO_PUBLIC_WS_URL=ws://192.168.1.50:8082
+EXPO_PUBLIC_STRIPE_API_URL=http://192.168.1.50:4000/api/stripe
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+El teléfono y la computadora deben estar conectados a la misma red local. La clave `STRIPE_SECRET_KEY` pertenece únicamente al servidor; nunca debe llevar el prefijo `EXPO_PUBLIC_` ni incluirse directamente en la aplicación móvil.
 
-## Join the community
+## Ejecutar
 
-Join our community of developers creating universal apps.
+Aplicación Expo:
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
-# PaintFoot.io
+```powershell
+npx expo start
+```
+
+Servidor multijugador/WebSocket, si no se inició automáticamente:
+
+```powershell
+npm run ws-server
+```
+
+Servidor de pagos:
+
+```powershell
+npm run stripe-server
+```
+
+## Android APK
+
+```powershell
+npm run build:apk
+```
+
+El GPS en segundo plano, las notificaciones push remotas y algunas integraciones nativas requieren un development build o APK; Expo Go no ofrece todas esas capacidades.
+
+## Verificación
+
+```powershell
+npx tsc --noEmit
+npm run test:territory
+```
+
+## Archivos locales que no se publican
+
+- `.env`: contiene credenciales y direcciones propias de cada equipo.
+- `node_modules/`: se reconstruye exactamente con `npm install` y `package-lock.json`.
+- `.expo/`: datos temporales generados por Expo.
+- Carpetas de caché, compilación y almacenamiento local del servidor.
+
+El proyecto, sus recursos, `package-lock.json` y la plantilla completa `.env.example` sí están versionados. Compartir la clave secreta por un canal privado evita que terceros ajenos al equipo puedan usar la cuenta de Stripe.
