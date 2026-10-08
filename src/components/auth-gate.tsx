@@ -76,26 +76,28 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         <Text style={styles.subtitle}>
           {registering ? "Crea tu cuenta para guardar tu progreso" : "Inicia sesión para continuar"}
         </Text>
-        <TextInput
-          autoCapitalize="words"
-          autoComplete="name"
-          onChangeText={setName}
-          placeholder="Nombre completo"
-          placeholderTextColor="#8390AE"
-          style={styles.input}
-          value={name}
-          editable={registering}
-        />
-        <TextInput
-          autoComplete="birthdate-year"
-          keyboardType="number-pad"
-          onChangeText={setAge}
-          placeholder="Edad"
-          placeholderTextColor="#8390AE"
-          style={styles.input}
-          value={age}
-          editable={registering}
-        />
+        {registering ? (
+          <>
+            <TextInput
+              autoCapitalize="words"
+              autoComplete="name"
+              onChangeText={setName}
+              placeholder="Nombre completo"
+              placeholderTextColor="#8390AE"
+              style={styles.input}
+              value={name}
+            />
+            <TextInput
+              autoComplete="birthdate-year"
+              keyboardType="number-pad"
+              onChangeText={setAge}
+              placeholder="Edad"
+              placeholderTextColor="#8390AE"
+              style={styles.input}
+              value={age}
+            />
+          </>
+        ) : null}
         <TextInput
           autoCapitalize="none"
           autoComplete="email"

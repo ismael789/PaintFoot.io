@@ -191,8 +191,13 @@ function startCustomAuthServer(port = Number(process.env.AUTH_PORT || DEFAULT_AU
         error.message.includes("válido") ||
         error.message.includes("entre 13") ||
         error.message.includes("no coinciden");
+      const databaseError = error.message.includes("Invalid API key")
+        ? "La clave privada de Supabase no es válida. Actualiza SUPABASE_SECRET_KEY en .env y reinicia npm start."
+        : error.message.includes("Could not find the table")
+          ? "Falta ejecutar supabase/paintfoot-custom-auth.sql en Supabase."
+          : "No fue posible completar la operación. Revisa la conexión con la base de datos.";
       return json(response, validationError ? 400 : 500, {
-        error: validationError ? error.message : "No fue posible completar la operación.",
+        error: validationError ? error.message : databaseError,
       });
     }
   });
