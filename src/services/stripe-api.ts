@@ -1,5 +1,6 @@
 import Constants from "expo-constants";
 import type { TerritoryShield } from "../types/game";
+import { buildEndpointCandidates } from "./network-endpoints";
 
 export interface StripeConnectionStatus {
   connected: boolean;
@@ -46,26 +47,65 @@ export interface ShieldServerStatus {
   free_available: boolean;
 }
 
-export type PlayerShieldServerStatus = Omit<ShieldServerStatus, "shield">;
+export interface PurchasedShield {
+  id: string;
+  durationHours: number;
+  productId: string;
+  purchasedAt: number;
+}
 
-function stripeApiBaseUrl() {
-  const configured = process.env.EXPO_PUBLIC_STRIPE_API_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "");
+export type PlayerShieldServerStatus = Omit<ShieldServerStatus, "shield"> & {
+  purchased_shields: PurchasedShield[];
+};
 
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (!hostUri) {
+let resolvedStripeApiBaseUrl: string | null = null;
+
+function stripeApiBaseUrls() {
+  return buildEndpointCandidates(
+    process.env.EXPO_PUBLIC_STRIPE_API_URL,
+    Constants.expoConfig?.hostUri,
+    { scheme: "http", defaultPort: 4000, fallbackPath: "/api/stripe" },
+  );
+}
+
+async function resolveStripeApiBaseUrl() {
+  if (resolvedStripeApiBaseUrl) return resolvedStripeApiBaseUrl;
+
+  const candidates = stripeApiBaseUrls();
+  if (candidates.length === 0) {
     throw new Error(
-      "Configura EXPO_PUBLIC_STRIPE_API_URL con la direccion del servidor Stripe",
+      "Configura EXPO_PUBLIC_STRIPE_API_URL con la direccion del servidor de pagos",
     );
   }
-  return `http://${hostUri.split(":")[0]}:4000/api/stripe`;
+
+  for (const candidate of candidates) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1_500);
+    try {
+      const response = await fetch(`${candidate}/config`, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (response.headers.get("X-PaintFoot-Server") === "stripe-api") {
+        resolvedStripeApiBaseUrl = candidate;
+        return candidate;
+      }
+    } catch {
+      // Probar el siguiente puerto disponible.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw new Error("No se encontro el servidor de pagos de PaintFoot.io");
 }
 
 async function stripeFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const baseUrl = await resolveStripeApiBaseUrl();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(`${stripeApiBaseUrl()}${path}`, {
+    const response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers: {
         Accept: "application/json",
@@ -150,7 +190,7 @@ export function claimFreeTerritoryShield(territoryId: string, playerId: string) 
 
 export function createShieldCheckout(input: {
   productId: string;
-  territoryId: string;
+  territoryId?: string | null;
   playerId: string;
   purchaseReference: string;
 }) {
@@ -158,7 +198,7 @@ export function createShieldCheckout(input: {
     method: "POST",
     body: JSON.stringify({
       product_id: input.productId,
-      territory_id: input.territoryId,
+      ...(input.territoryId ? { territory_id: input.territoryId } : {}),
       player_id: input.playerId,
       purchase_reference: input.purchaseReference,
     }),
@@ -167,15 +207,37 @@ export function createShieldCheckout(input: {
 
 export function confirmShieldCheckout(
   sessionId: string,
-  territoryId: string,
+  territoryId: string | null,
   playerId: string,
 ) {
-  return stripeFetch<{ shield: TerritoryShield; payment_id: string }>(
+  return stripeFetch<{
+    shield: TerritoryShield | null;
+    purchased_shield: PurchasedShield | null;
+    payment_id: string;
+  }>(
     "/shield/confirm",
     {
       method: "POST",
       body: JSON.stringify({
         session_id: sessionId,
+        ...(territoryId ? { territory_id: territoryId } : {}),
+        player_id: playerId,
+      }),
+    },
+  );
+}
+
+export function activatePurchasedTerritoryShield(
+  purchasedShieldId: string,
+  territoryId: string,
+  playerId: string,
+) {
+  return stripeFetch<{ shield: TerritoryShield; purchased_shield_id: string }>(
+    "/shield/activate-purchased",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        purchased_shield_id: purchasedShieldId,
         territory_id: territoryId,
         player_id: playerId,
       }),

@@ -123,12 +123,43 @@ export interface Territory {
   color: string;
   owner: string;
   shield?: TerritoryShield | null;
+  status?: TerritoryStatus;
+  globalOwnerId?: string;
+  targetTerritoryId?: string | null;
+  regionIds?: string[];
+  captureSessionId?: string | null;
 }
+
+export type TerritoryStatus =
+  | "confirmed"
+  | "protected"
+  | "vulnerable"
+  | "pending_validation"
+  | "pending_global_sync"
+  | "pending_capture"
+  | "disputed"
+  | "captured"
+  | "rejected";
 
 export interface PlayerProfile {
   id: string;
   name: string;
   color: string;
+  globalId?: string;
+}
+
+export interface NearbyPlayer {
+  id: string;
+  name: string;
+  color: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  heading: number | null;
+  speed: number | null;
+  regionId: string;
+  updatedAt: number;
+  trail?: GeoCoordinate[];
 }
 
 export interface RoadSegment {

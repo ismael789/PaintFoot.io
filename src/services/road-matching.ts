@@ -47,6 +47,7 @@ export interface RoadMatchResult {
   unmatchedPointCount: number;
   source?: "network" | "cache";
   serverTimeMs?: number | null;
+  cacheCoverageComplete?: boolean;
 }
 
 interface MatchTraceOptions {

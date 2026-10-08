@@ -9,7 +9,7 @@ export type ShieldPurchaseStatus =
 export interface ShieldPurchaseRecord {
   id: string;
   playerId: string;
-  territoryId: string;
+  territoryId: string | null;
   productId: string;
   durationHours: number;
   amount: number | null;
@@ -31,7 +31,7 @@ function isRecord(value: unknown): value is ShieldPurchaseRecord {
   return (
     typeof record.id === "string" &&
     typeof record.playerId === "string" &&
-    typeof record.territoryId === "string" &&
+    (record.territoryId === null || typeof record.territoryId === "string") &&
     typeof record.productId === "string" &&
     typeof record.durationHours === "number" &&
     typeof record.createdAt === "number" &&

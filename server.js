@@ -1,17 +1,18 @@
+require("dotenv").config();
+
+const http = require("http");
 const WebSocket = require("ws");
 const { startStripeApi } = require("./stripe-api");
 const { shieldServerStore } = require("./shield-server-store");
+const { startCustomAuthServer } = require("./custom-auth-server");
 
-const port = 8082;
-const wss = new WebSocket.Server({ port });
+const DEFAULT_WS_PORT = 8082;
+const MAX_PORT_ATTEMPTS = 20;
 const expoPushEndpoint = "https://exp.host/--/api/v2/push/send";
 
 // Almacena la última ubicación y el tiempo de cada jugador
 const players = {};
 const pushTokens = {};
-
-// API HTTP independiente: no crea tablas ni guarda pagos localmente.
-startStripeApi();
 
 function isExpoPushToken(value) {
   return (
@@ -58,10 +59,13 @@ async function sendTerritoryPush(excludedPlayerId, owner) {
   console.log(`[Push] ${tokens.length} notificacion(es) enviada(s).`);
 }
 
-wss.on("connection", function connection(ws) {
+function attachWebSocketHandlers(wss) {
+  wss.on("connection", function connection(ws) {
   console.log("Nuevo cliente conectado");
   let connectedPlayerId = null;
   let lastTerritoryNotificationAt = 0;
+
+  ws.send(JSON.stringify({ type: "server-ready", service: "paintfoot" }));
 
   ws.on("message", function incoming(message) {
     try {
@@ -145,6 +149,69 @@ wss.on("connection", function connection(ws) {
     );
     // El token se conserva para poder notificar aunque la app esté cerrada.
   });
-});
+  });
+}
 
-console.log(`Servidor WebSocket corriendo en el puerto ${port}`);
+function preferredWebSocketPort() {
+  const configured = Number(process.env.WS_PORT || DEFAULT_WS_PORT);
+  return Number.isInteger(configured) && configured >= 1 && configured <= 65_535
+    ? configured
+    : DEFAULT_WS_PORT;
+}
+
+function skipMetroPort(port) {
+  const metroPort = Number(process.env.RCT_METRO_PORT);
+  return Number.isInteger(metroPort) && port === metroPort ? port + 1 : port;
+}
+
+function startWebSocketServer(startPort = preferredWebSocketPort(), attempt = 0) {
+  const httpServer = http.createServer();
+  const wss = new WebSocket.Server({ server: httpServer });
+  attachWebSocketHandlers(wss);
+  wss.on("error", (error) => {
+    if (error.code !== "EADDRINUSE") {
+      console.error("[WebSocket] Error del servidor:", error.message);
+    }
+  });
+  let selectedPort = skipMetroPort(startPort);
+  let currentAttempt = attempt;
+
+  httpServer.on("listening", () => {
+    const address = httpServer.address();
+    const listeningPort =
+      address && typeof address === "object" ? address.port : selectedPort;
+    console.log(`Servidor WebSocket corriendo en el puerto ${listeningPort}`);
+  });
+  httpServer.on("error", (error) => {
+    if (
+      error.code === "EADDRINUSE" &&
+      currentAttempt + 1 < MAX_PORT_ATTEMPTS &&
+      selectedPort < 65_535
+    ) {
+      const occupiedPort = selectedPort;
+      selectedPort = skipMetroPort(selectedPort + 1);
+      currentAttempt += 1;
+      console.warn(
+        `[WebSocket] Puerto ${occupiedPort} ocupado; intentando ${selectedPort}.`,
+      );
+      httpServer.listen(selectedPort, "0.0.0.0");
+      return;
+    }
+    console.error("[WebSocket] No se pudo iniciar:", error.message);
+  });
+  httpServer.listen(selectedPort, "0.0.0.0");
+
+  return { httpServer, webSocketServer: wss };
+}
+
+function startPaintFootServer() {
+  // APIs independientes: la clave secreta solo se usa en este proceso de servidor.
+  const stripeServer = startStripeApi();
+  const webSocket = startWebSocketServer();
+  const authServer = startCustomAuthServer();
+  return { stripeServer, authServer, ...webSocket };
+}
+
+if (require.main === module) startPaintFootServer();
+
+module.exports = { startPaintFootServer, startWebSocketServer };

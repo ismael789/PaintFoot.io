@@ -1,6 +1,20 @@
 import * as Crypto from "expo-crypto";
 import * as SQLite from "expo-sqlite";
 
+import { REGIONAL_CACHE_CONFIG } from "@/config/offline";
+import {
+  clearRoadCacheFiles,
+  deleteRoadCacheBlock,
+  getRoadCacheFilesSize,
+  getAvailableStorageBytes,
+  readRoadCacheBlock,
+  writeRoadCacheBlock,
+} from "@/services/app-file-storage";
+import {
+  getMonotonicSnapshot,
+  initializeMonotonicClock,
+  type MonotonicSource,
+} from "@/services/monotonic-clock";
 import type {
   GeoJsonPolygon,
   RawTrackPoint,
@@ -10,16 +24,29 @@ import type {
 } from "@/types/game";
 
 const DATABASE_NAME = "paintfoot-offline.db";
-const DATABASE_VERSION = 2;
-const ROAD_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
-const ROAD_CACHE_MAX_SEGMENTS = 5_000;
+const DATABASE_VERSION = 5;
+const ROAD_CACHE_TTL_MS = REGIONAL_CACHE_CONFIG.ttlMs;
+const ROAD_CACHE_MAX_REGIONS = REGIONAL_CACHE_CONFIG.maxRegions;
+const ROAD_CACHE_MAX_BYTES = REGIONAL_CACHE_CONFIG.maxBytes;
 const CLOCK_BACKWARDS_TOLERANCE_MS = 5_000;
+const CLOCK_DRIFT_TOLERANCE_MS = 2 * 60 * 1_000;
 
 export type OfflineSessionStatus =
   | "active"
+  | "active_local"
+  | "active_offline"
+  | "active_syncing"
   | "pending_sync"
   | "synced"
   | "completed";
+
+export function isActiveOfflineSessionStatus(
+  status: OfflineSessionStatus,
+) {
+  return ["active", "active_local", "active_offline", "active_syncing"].includes(
+    status,
+  );
+}
 
 export interface OfflineTrackingSession {
   id: string;
@@ -30,13 +57,22 @@ export interface OfflineTrackingSession {
   status: OfflineSessionStatus;
   clockAnomaly: boolean;
   createdOffline: boolean;
+  cacheCoverage: OfflineCacheCoverage;
 }
+
+export type OfflineCacheCoverage = "unknown" | "network" | "partial" | "complete";
 
 export interface OfflineTrackingPoint extends RawTrackPoint {
   sessionId: string;
   sequence: number;
   wallClockTimestamp: number;
   monotonicTimestamp: number;
+  monotonicSource: MonotonicSource;
+  bootId: string;
+  lastTrustedServerTime: number | null;
+  estimatedTrustedTime: number | null;
+  regionId: string;
+  matchedOffline: boolean;
   sensorConfidence: number | null;
   createdOffline: boolean;
   previousHash: string;
@@ -65,6 +101,36 @@ export interface OfflineStorageStats {
   pendingTerritoriesCount: number;
   roadCacheSize: number;
   localStorageUsed: number;
+  territoriesSize: number;
+  tracksSize: number;
+  importantDataSize: number;
+  totalSize: number;
+  pendingSyncCount: number;
+  roadCacheRegionCount: number;
+}
+
+export type SyncOperationAction =
+  | "CREATE_TERRITORY"
+  | "UPDATE_TERRITORY"
+  | "CREATE_SESSION"
+  | "UPDATE_SESSION"
+  | "UPLOAD_TRACK"
+  | "SYNC_STATS"
+  | "VALIDATE_TERRITORY";
+
+export interface SyncQueueOperation {
+  id: string;
+  userId: string;
+  entityType: string;
+  entityId: string;
+  action: SyncOperationAction;
+  payload: Record<string, unknown>;
+  status: "pending" | "processing" | "done";
+  attempts: number;
+  createdAt: number;
+  updatedAt: number;
+  lastAttemptAt: number | null;
+  lastError: string | null;
 }
 
 interface SessionRow {
@@ -79,6 +145,10 @@ interface SessionRow {
   last_sequence: number;
   last_hash: string;
   last_wall_clock: number | null;
+  last_monotonic: number | null;
+  last_boot_id: string | null;
+  monotonic_source: MonotonicSource | null;
+  cache_coverage: OfflineCacheCoverage;
 }
 
 interface PointRow {
@@ -91,6 +161,12 @@ interface PointRow {
   heading: number | null;
   wall_clock_timestamp: number;
   monotonic_timestamp: number;
+  monotonic_source: MonotonicSource;
+  boot_id: string;
+  last_trusted_server_time: number | null;
+  estimated_trusted_time: number | null;
+  region_id: string;
+  matched_offline: number;
   sensor_confidence: number | null;
   created_offline: number;
   sensor_json: string | null;
@@ -123,15 +199,59 @@ interface TrustedTimeRow {
   boot_id: string;
 }
 
+interface RoadCacheRegionRow {
+  region_id: string;
+  file_path: string;
+  min_lat: number;
+  max_lat: number;
+  min_lon: number;
+  max_lon: number;
+  size_bytes: number;
+  content_hash: string;
+  created_at: number;
+  updated_at: number;
+  last_accessed: number;
+  expires_at: number;
+  pinned: number;
+  pinned_reason: string | null;
+  priority: number;
+  coverage_status: "complete" | "partial" | "missing" | "stale";
+  data_version: number;
+}
+
+interface SyncQueueRow {
+  id: string;
+  user_id: string;
+  entity_type: string;
+  entity_id: string;
+  action: SyncOperationAction;
+  payload_json: string;
+  status: SyncQueueOperation["status"];
+  attempts: number;
+  created_at: number;
+  updated_at: number;
+  last_attempt_at: number | null;
+  last_error: string | null;
+}
+
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 let operationQueue: Promise<void> = Promise.resolve();
-const bootId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 export function monotonicNow() {
-  return typeof performance !== "undefined" &&
-    typeof performance.now === "function"
-    ? performance.now()
-    : 0;
+  return getMonotonicSnapshot().monotonicTimestamp;
+}
+
+export function coordinateRegionId(coordinate: {
+  latitude: number;
+  longitude: number;
+}) {
+  const latitudeCell = Math.floor(
+    (coordinate.latitude + 90) / ROAD_REGION_DEGREES,
+  );
+  const longitudeCell = Math.floor(
+    (coordinate.longitude + 180) / ROAD_REGION_DEGREES,
+  );
+  return `region_${latitudeCell}_${longitudeCell}`;
 }
 
 function serializeOperation<T>(operation: () => Promise<T>) {
@@ -143,9 +263,206 @@ function serializeOperation<T>(operation: () => Promise<T>) {
   return result;
 }
 
+const ROAD_REGION_DEGREES = REGIONAL_CACHE_CONFIG.regionDegrees;
+
+export function roadRegionBoundsFromId(regionId: string) {
+  const match = /^region_(\d+)_(\d+)$/.exec(regionId);
+  if (!match) return null;
+  const latitudeCell = Number(match[1]);
+  const longitudeCell = Number(match[2]);
+  const minLat = latitudeCell * ROAD_REGION_DEGREES - 90;
+  const minLon = longitudeCell * ROAD_REGION_DEGREES - 180;
+  return {
+    minLat,
+    maxLat: minLat + ROAD_REGION_DEGREES,
+    minLon,
+    maxLon: minLon + ROAD_REGION_DEGREES,
+  };
+}
+
+export function neighboringRoadRegionIds(
+  coordinate: { latitude: number; longitude: number },
+  radius = REGIONAL_CACHE_CONFIG.neighborRadius,
+) {
+  const center = coordinateRegionId(coordinate);
+  const match = /^region_(\d+)_(\d+)$/.exec(center);
+  if (!match) return [center];
+  const latitudeCell = Number(match[1]);
+  const longitudeCell = Number(match[2]);
+  const ids: string[] = [];
+  for (let latitudeOffset = -radius; latitudeOffset <= radius; latitudeOffset += 1) {
+    for (let longitudeOffset = -radius; longitudeOffset <= radius; longitudeOffset += 1) {
+      ids.push(
+        `region_${latitudeCell + latitudeOffset}_${longitudeCell + longitudeOffset}`,
+      );
+    }
+  }
+  return ids;
+}
+
+function roadRegionId(segment: RoadSegment) {
+  const coordinate =
+    segment.coordinates[Math.floor(segment.coordinates.length / 2)] ??
+    segment.coordinates[0];
+  return coordinate ? coordinateRegionId(coordinate) : "region_unknown";
+}
+
+function roadRegionBounds(segments: RoadSegment[]) {
+  const coordinates = segments.flatMap((segment) => segment.coordinates);
+  return {
+    minLat: Math.min(...coordinates.map((point) => point.latitude)),
+    maxLat: Math.max(...coordinates.map((point) => point.latitude)),
+    minLon: Math.min(...coordinates.map((point) => point.longitude)),
+    maxLon: Math.max(...coordinates.map((point) => point.longitude)),
+  };
+}
+
+async function persistRoadRegion(
+  db: SQLite.SQLiteDatabase,
+  regionId: string,
+  segments: RoadSegment[],
+  pinned: boolean,
+  now = Date.now(),
+  coverageStatus: RoadCacheRegionRow["coverage_status"] = "partial",
+  pinnedReason: string | null = null,
+) {
+  if (segments.length === 0) return;
+  const bounds = roadRegionBoundsFromId(regionId) ?? roadRegionBounds(segments);
+  const file = await writeRoadCacheBlock(regionId, segments);
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync(
+      `INSERT INTO road_cache_regions
+       (region_id, file_path, min_lat, max_lat, min_lon, max_lon, size_bytes,
+        content_hash, created_at, updated_at, last_accessed, expires_at, pinned,
+        pinned_reason, priority, coverage_status, data_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(region_id) DO UPDATE SET
+         file_path = excluded.file_path,
+         min_lat = excluded.min_lat,
+         max_lat = excluded.max_lat,
+         min_lon = excluded.min_lon,
+         max_lon = excluded.max_lon,
+         size_bytes = excluded.size_bytes,
+         content_hash = excluded.content_hash,
+         updated_at = excluded.updated_at,
+         last_accessed = excluded.last_accessed,
+         expires_at = excluded.expires_at,
+         pinned = MAX(road_cache_regions.pinned, excluded.pinned),
+         pinned_reason = COALESCE(road_cache_regions.pinned_reason, excluded.pinned_reason),
+         priority = MAX(road_cache_regions.priority, excluded.priority),
+         coverage_status = excluded.coverage_status`,
+      regionId,
+      file.relativePath,
+      bounds.minLat,
+      bounds.maxLat,
+      bounds.minLon,
+      bounds.maxLon,
+      file.sizeBytes,
+      file.contentHash,
+      now,
+      now,
+      now,
+      now + ROAD_CACHE_TTL_MS,
+      pinned ? 1 : 0,
+      pinnedReason,
+      pinned ? 100 : 10,
+      coverageStatus,
+    );
+    await transaction.runAsync(
+      "DELETE FROM road_cache_segment_index WHERE region_id = ?",
+      regionId,
+    );
+    for (const segment of segments) {
+      await transaction.runAsync(
+        `INSERT OR REPLACE INTO road_cache_segment_index (segment_id, region_id)
+         VALUES (?, ?)`,
+        segment.id,
+        regionId,
+      );
+    }
+  });
+}
+
+async function migrateLegacyRoadCache(db: SQLite.SQLiteDatabase) {
+  const legacyRows = await db.getAllAsync<{
+    id: string;
+    segment_json: string;
+    pinned: number;
+  }>("SELECT id, segment_json, pinned FROM road_cache WHERE segment_json <> ''");
+  if (legacyRows.length === 0) return;
+
+  const regions = new Map<
+    string,
+    { segments: Map<string, RoadSegment>; pinned: boolean; legacyIds: string[] }
+  >();
+  for (const row of legacyRows) {
+    try {
+      const segment = JSON.parse(row.segment_json) as RoadSegment;
+      const regionId = roadRegionId(segment);
+      const region = regions.get(regionId) ?? {
+        segments: new Map<string, RoadSegment>(),
+        pinned: false,
+        legacyIds: [],
+      };
+      region.segments.set(segment.id, segment);
+      region.pinned ||= row.pinned === 1;
+      region.legacyIds.push(row.id);
+      regions.set(regionId, region);
+    } catch {
+      // La cache es regenerable; una fila antigua dañada se descarta abajo.
+    }
+  }
+
+  for (const [regionId, region] of regions) {
+    await persistRoadRegion(
+      db,
+      regionId,
+      [...region.segments.values()],
+      region.pinned,
+    );
+  }
+  await db.runAsync("DELETE FROM road_cache");
+}
+
+async function getRequiredRoadRegionPin(
+  db: SQLite.SQLiteDatabase,
+  regionId: string,
+): Promise<{ pinned: boolean; reason: string | null }> {
+  const territoryRows = await db.getAllAsync<{ payload_json: string }>(
+    "SELECT payload_json FROM territories",
+  );
+  for (const row of territoryRows) {
+    try {
+      const territory = JSON.parse(row.payload_json) as Territory;
+      if (territory.coordinates.some((point) => coordinateRegionId(point) === regionId)) {
+        return { pinned: true, reason: "territory" };
+      }
+    } catch {
+      // Una copia daÃ±ada no debe impedir regenerar mapas.
+    }
+  }
+  const pendingRows = await db.getAllAsync<{ raw_track_json: string }>(
+    `SELECT raw_track_json FROM pending_territories
+     WHERE status = 'pending_validation'`,
+  );
+  for (const row of pendingRows) {
+    try {
+      const track = JSON.parse(row.raw_track_json) as RawTrackPoint[];
+      if (track.some((point) => coordinateRegionId(point) === regionId)) {
+        return { pinned: true, reason: "pending_validation" };
+      }
+    } catch {
+      // Se conserva el resto de la cache aunque un pendiente estÃ© daÃ±ado.
+    }
+  }
+  return { pinned: false, reason: null };
+}
+
 async function openDatabase() {
   if (!databasePromise) {
-    databasePromise = SQLite.openDatabaseAsync(DATABASE_NAME).then(async (db) => {
+    databasePromise = initializeMonotonicClock()
+      .then(() => SQLite.openDatabaseAsync(DATABASE_NAME))
+      .then(async (db) => {
       await db.execAsync(`
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
@@ -160,7 +477,11 @@ async function openDatabase() {
           created_offline INTEGER NOT NULL DEFAULT 0,
           last_sequence INTEGER NOT NULL DEFAULT 0,
           last_hash TEXT NOT NULL DEFAULT '',
-          last_wall_clock INTEGER
+          last_wall_clock INTEGER,
+          last_monotonic REAL,
+          last_boot_id TEXT,
+          monotonic_source TEXT,
+          cache_coverage TEXT NOT NULL DEFAULT 'unknown'
         );
         CREATE TABLE IF NOT EXISTS tracking_points (
           session_id TEXT NOT NULL,
@@ -172,6 +493,12 @@ async function openDatabase() {
           heading REAL,
           wall_clock_timestamp INTEGER NOT NULL,
           monotonic_timestamp REAL NOT NULL,
+          monotonic_source TEXT NOT NULL DEFAULT 'js_monotonic_fallback',
+          boot_id TEXT NOT NULL DEFAULT 'legacy',
+          last_trusted_server_time INTEGER,
+          estimated_trusted_time INTEGER,
+          region_id TEXT NOT NULL DEFAULT 'region_unknown',
+          matched_offline INTEGER NOT NULL DEFAULT 0,
           sensor_confidence REAL,
           created_offline INTEGER NOT NULL DEFAULT 0,
           sensor_json TEXT,
@@ -189,6 +516,9 @@ async function openDatabase() {
           sequence INTEGER NOT NULL,
           wall_clock_timestamp INTEGER NOT NULL,
           monotonic_timestamp REAL NOT NULL,
+          monotonic_source TEXT NOT NULL DEFAULT 'js_monotonic_fallback',
+          boot_id TEXT NOT NULL DEFAULT 'legacy',
+          estimated_trusted_time INTEGER,
           payload_json TEXT NOT NULL,
           PRIMARY KEY (session_id, sequence),
           FOREIGN KEY (session_id) REFERENCES tracking_sessions(id) ON DELETE CASCADE
@@ -225,14 +555,45 @@ async function openDatabase() {
         );
         CREATE INDEX IF NOT EXISTS idx_road_cache_bounds
           ON road_cache(min_lat, max_lat, min_lon, max_lon);
+        CREATE TABLE IF NOT EXISTS road_cache_regions (
+          region_id TEXT PRIMARY KEY NOT NULL,
+          file_path TEXT NOT NULL,
+          min_lat REAL NOT NULL,
+          max_lat REAL NOT NULL,
+          min_lon REAL NOT NULL,
+          max_lon REAL NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL DEFAULT 0,
+          last_accessed INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          pinned INTEGER NOT NULL DEFAULT 0,
+          pinned_reason TEXT,
+          priority INTEGER NOT NULL DEFAULT 0,
+          coverage_status TEXT NOT NULL DEFAULT 'partial',
+          data_version INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_road_cache_regions_bounds
+          ON road_cache_regions(min_lat, max_lat, min_lon, max_lon);
+        CREATE TABLE IF NOT EXISTS road_cache_segment_index (
+          segment_id TEXT PRIMARY KEY NOT NULL,
+          region_id TEXT NOT NULL,
+          FOREIGN KEY (region_id) REFERENCES road_cache_regions(region_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_road_cache_segment_region
+          ON road_cache_segment_index(region_id);
         CREATE TABLE IF NOT EXISTS sync_queue (
           id TEXT PRIMARY KEY NOT NULL,
+          user_id TEXT NOT NULL DEFAULT '',
           entity_type TEXT NOT NULL,
           entity_id TEXT NOT NULL,
           action TEXT NOT NULL,
           payload_json TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'pending',
           attempts INTEGER NOT NULL DEFAULT 0,
+          last_attempt_at INTEGER,
+          last_error TEXT,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE(entity_type, entity_id, action)
@@ -253,11 +614,75 @@ async function openDatabase() {
           "ALTER TABLE tracking_points ADD COLUMN accepted INTEGER NOT NULL DEFAULT 1",
         );
       }
+      if ((version?.user_version ?? 0) < 3) {
+        const syncColumns = await db.getAllAsync<{ name: string }>(
+          "PRAGMA table_info(sync_queue)",
+        );
+        if (!syncColumns.some((column) => column.name === "user_id")) {
+          await db.execAsync(
+            "ALTER TABLE sync_queue ADD COLUMN user_id TEXT NOT NULL DEFAULT ''",
+          );
+        }
+        await db.runAsync(
+          "UPDATE sync_queue SET status = 'done', updated_at = ? WHERE action = 'validate'",
+          Date.now(),
+        );
+      }
+      if ((version?.user_version ?? 0) < 4) {
+        const ensureColumn = async (
+          table: string,
+          name: string,
+          definition: string,
+        ) => {
+          const columns = await db.getAllAsync<{ name: string }>(
+            `PRAGMA table_info(${table})`,
+          );
+          if (!columns.some((column) => column.name === name)) {
+            await db.execAsync(
+              `ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`,
+            );
+          }
+        };
+        await ensureColumn("tracking_sessions", "last_monotonic", "REAL");
+        await ensureColumn("tracking_sessions", "last_boot_id", "TEXT");
+        await ensureColumn("tracking_sessions", "monotonic_source", "TEXT");
+        await ensureColumn("tracking_points", "monotonic_source", "TEXT NOT NULL DEFAULT 'js_monotonic_fallback'");
+        await ensureColumn("tracking_points", "boot_id", "TEXT NOT NULL DEFAULT 'legacy'");
+        await ensureColumn("tracking_points", "last_trusted_server_time", "INTEGER");
+        await ensureColumn("tracking_points", "estimated_trusted_time", "INTEGER");
+        await ensureColumn("tracking_points", "region_id", "TEXT NOT NULL DEFAULT 'region_unknown'");
+        await ensureColumn("tracking_points", "matched_offline", "INTEGER NOT NULL DEFAULT 0");
+        await ensureColumn("sensor_events", "monotonic_source", "TEXT NOT NULL DEFAULT 'js_monotonic_fallback'");
+        await ensureColumn("sensor_events", "boot_id", "TEXT NOT NULL DEFAULT 'legacy'");
+        await ensureColumn("sensor_events", "estimated_trusted_time", "INTEGER");
+        await ensureColumn("road_cache_regions", "created_at", "INTEGER NOT NULL DEFAULT 0");
+        await ensureColumn("road_cache_regions", "updated_at", "INTEGER NOT NULL DEFAULT 0");
+        await ensureColumn("road_cache_regions", "pinned_reason", "TEXT");
+        await ensureColumn("road_cache_regions", "priority", "INTEGER NOT NULL DEFAULT 0");
+        await ensureColumn("road_cache_regions", "coverage_status", "TEXT NOT NULL DEFAULT 'partial'");
+        await ensureColumn("road_cache_regions", "data_version", "INTEGER NOT NULL DEFAULT 1");
+        await ensureColumn("sync_queue", "last_attempt_at", "INTEGER");
+        await ensureColumn("sync_queue", "last_error", "TEXT");
+      }
+      if ((version?.user_version ?? 0) < 5) {
+        const sessionColumns = await db.getAllAsync<{ name: string }>(
+          "PRAGMA table_info(tracking_sessions)",
+        );
+        if (!sessionColumns.some((column) => column.name === "cache_coverage")) {
+          await db.execAsync(
+            "ALTER TABLE tracking_sessions ADD COLUMN cache_coverage TEXT NOT NULL DEFAULT 'unknown'",
+          );
+        }
+      }
       if ((version?.user_version ?? 0) < DATABASE_VERSION) {
         await db.execAsync(`PRAGMA user_version = ${DATABASE_VERSION}`);
       }
-      return db;
-    });
+      await db.runAsync(
+        "UPDATE sync_queue SET status = 'pending' WHERE status = 'processing'",
+      );
+      await migrateLegacyRoadCache(db);
+        return db;
+      });
   }
   return databasePromise;
 }
@@ -276,7 +701,73 @@ function sessionFromRow(row: SessionRow): OfflineTrackingSession {
     status: row.status,
     clockAnomaly: row.clock_anomaly === 1,
     createdOffline: row.created_offline === 1,
+    cacheCoverage: row.cache_coverage ?? "unknown",
   };
+}
+
+export function setActiveTrackingCacheCoverage(
+  coverage: Exclude<OfflineCacheCoverage, "unknown">,
+) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const session = await db.getFirstAsync<{ id: string }>(
+      `SELECT id FROM tracking_sessions
+       WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing', 'pending_sync')
+       ORDER BY started_at DESC LIMIT 1`,
+    );
+    if (!session) return;
+    await db.runAsync(
+      "UPDATE tracking_sessions SET cache_coverage = ? WHERE id = ?",
+      coverage,
+      session.id,
+    );
+    if (coverage === "complete") {
+      await db.runAsync(
+        `UPDATE tracking_points SET matched_offline = 1
+         WHERE session_id = ? AND created_offline = 1 AND accepted = 1`,
+        session.id,
+      );
+    }
+  });
+}
+
+async function enqueueSyncOperationDirect(
+  db: SQLite.SQLiteDatabase,
+  operation: {
+    userId: string;
+    entityType: string;
+    entityId: string;
+    action: SyncOperationAction;
+    payload?: Record<string, unknown>;
+    createdAt?: number;
+  },
+) {
+  const createdAt = operation.createdAt ?? Date.now();
+  const queuedAt = Date.now();
+  const id = `${operation.action}:${operation.entityType}:${operation.entityId}:${queuedAt}`;
+  await db.runAsync(
+    `INSERT INTO sync_queue
+     (id, user_id, entity_type, entity_id, action, payload_json, status,
+      attempts, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+     ON CONFLICT(entity_type, entity_id, action) DO UPDATE SET
+       id = excluded.id,
+       user_id = excluded.user_id,
+       payload_json = excluded.payload_json,
+       status = 'pending',
+       attempts = 0,
+       last_attempt_at = NULL,
+       last_error = NULL,
+       updated_at = excluded.updated_at`,
+    id,
+    operation.userId,
+    operation.entityType,
+    operation.entityId,
+    operation.action,
+    JSON.stringify(operation.payload ?? {}),
+    queuedAt,
+    createdAt,
+  );
 }
 
 export function beginOfflineTrackingSession(
@@ -287,24 +778,44 @@ export function beginOfflineTrackingSession(
   return serializeOperation(async () => {
     const db = await openDatabase();
     const id = `route-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const clock = getMonotonicSnapshot();
+    const status: OfflineSessionStatus = createdOffline
+      ? "active_offline"
+      : "active_local";
     await db.runAsync(
       `INSERT INTO tracking_sessions
-       (id, player_id, started_at, stopped_at, pending_road_match, status, created_offline)
-       VALUES (?, ?, ?, NULL, 0, 'active', ?)`,
+       (id, player_id, started_at, stopped_at, pending_road_match, status,
+        created_offline, last_wall_clock, last_monotonic, last_boot_id,
+        monotonic_source)
+       VALUES (?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?)`,
       id,
       playerId,
       startedAt,
+      status,
       createdOffline ? 1 : 0,
+      startedAt,
+      clock.monotonicTimestamp,
+      clock.bootId,
+      clock.monotonicSource,
     );
+    await enqueueSyncOperationDirect(db, {
+      userId: playerId,
+      entityType: "tracking_session",
+      entityId: id,
+      action: "UPDATE_SESSION",
+      payload: { sessionId: id },
+      createdAt: startedAt,
+    });
     return {
       id,
       playerId,
       startedAt,
       stoppedAt: null,
       pendingRoadMatch: false,
-      status: "active" as const,
+      status,
       clockAnomaly: false,
       createdOffline,
+      cacheCoverage: "unknown" as const,
     };
   });
 }
@@ -314,7 +825,7 @@ export function getRecoverableTrackingSession() {
     const db = await openDatabase();
     const row = await db.getFirstAsync<SessionRow>(
       `SELECT * FROM tracking_sessions
-       WHERE status IN ('active', 'pending_sync')
+       WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing', 'pending_sync')
        ORDER BY started_at DESC LIMIT 1`,
     );
     return row ? sessionFromRow(row) : null;
@@ -330,7 +841,7 @@ export function setTrackingSessionStatus(
     const db = await openDatabase();
     const session = await db.getFirstAsync<SessionRow>(
       `SELECT * FROM tracking_sessions
-       WHERE status IN ('active', 'pending_sync')
+       WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing', 'pending_sync')
        ORDER BY started_at DESC LIMIT 1`,
     );
     if (!session) return;
@@ -343,6 +854,41 @@ export function setTrackingSessionStatus(
       pendingRoadMatch ? 1 : 0,
       session.id,
     );
+    await enqueueSyncOperationDirect(db, {
+      userId: session.player_id,
+      entityType: "tracking_session",
+      entityId: session.id,
+      action: "UPDATE_SESSION",
+      payload: { sessionId: session.id },
+    });
+  });
+}
+
+export function setActiveTrackingConnectionStatus(
+  status: "active_local" | "active_offline" | "active_syncing",
+) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    await db.runAsync(
+      `UPDATE tracking_sessions SET status = ?
+       WHERE id = (
+         SELECT id FROM tracking_sessions
+         WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing')
+         ORDER BY started_at DESC LIMIT 1
+       )`,
+      status,
+    );
+  });
+}
+
+export function getTrackingSessionById(sessionId: string) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const row = await db.getFirstAsync<SessionRow>(
+      "SELECT * FROM tracking_sessions WHERE id = ?",
+      sessionId,
+    );
+    return row ? sessionFromRow(row) : null;
   });
 }
 
@@ -367,6 +913,12 @@ function canonicalPointPayload(input: {
   point: RawTrackPoint;
   wallClockTimestamp: number;
   monotonicTimestamp: number;
+  monotonicSource: MonotonicSource;
+  bootId: string;
+  lastTrustedServerTime: number | null;
+  estimatedTrustedTime: number | null;
+  regionId: string;
+  matchedOffline: boolean;
   sensorConfidence: number | null;
   createdOffline: boolean;
   previousHash: string;
@@ -382,6 +934,12 @@ function canonicalPointPayload(input: {
     heading: input.point.heading ?? null,
     wallClockTimestamp: input.wallClockTimestamp,
     monotonicTimestamp: input.monotonicTimestamp,
+    monotonicSource: input.monotonicSource,
+    bootId: input.bootId,
+    lastTrustedServerTime: input.lastTrustedServerTime,
+    estimatedTrustedTime: input.estimatedTrustedTime,
+    regionId: input.regionId,
+    matchedOffline: input.matchedOffline,
     sensorConfidence: input.sensorConfidence,
     sensor: input.point.sensor ?? null,
     createdOffline: input.createdOffline,
@@ -399,25 +957,49 @@ export function appendOfflineTrackingPoints(
     const db = await openDatabase();
     const session = await db.getFirstAsync<SessionRow>(
       `SELECT * FROM tracking_sessions
-       WHERE status = 'active' ORDER BY started_at DESC LIMIT 1`,
+       WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing')
+       ORDER BY started_at DESC LIMIT 1`,
     );
     if (!session) return [];
 
     let sequence = session.last_sequence;
     let previousHash = session.last_hash;
     let previousWallClock = session.last_wall_clock;
+    let previousMonotonic = session.last_monotonic;
+    let previousBootId = session.last_boot_id;
     let sessionClockAnomaly = session.clock_anomaly === 1;
     const stored: OfflineTrackingPoint[] = [];
+    const trustedTime = await db.getFirstAsync<TrustedTimeRow>(
+      "SELECT server_time, monotonic_time, boot_id FROM trusted_time WHERE singleton = 1",
+    );
 
     await db.withExclusiveTransactionAsync(async (transaction) => {
       for (const point of points) {
         sequence += 1;
         const wallClockTimestamp = point.timestamp ?? Date.now();
-        const monotonicTimestamp = monotonicNow();
+        const clock = getMonotonicSnapshot();
+        const monotonicTimestamp = clock.monotonicTimestamp;
+        const sameBoot = previousBootId === null || previousBootId === clock.bootId;
+        const estimatedTrustedTime =
+          trustedTime?.boot_id === clock.bootId
+            ? trustedTime.server_time +
+              Math.max(0, monotonicTimestamp - trustedTime.monotonic_time)
+            : null;
+        const regionId = coordinateRegionId(point);
+        const matchedOffline = Boolean(createdOffline && point.roadSegmentId);
         const sensorConfidence = confidenceFromSensor(point.sensor);
-        const clockAnomaly =
+        const wallClockWentBack =
           previousWallClock !== null &&
           wallClockTimestamp + CLOCK_BACKWARDS_TOLERANCE_MS < previousWallClock;
+        const deltaMismatch =
+          sameBoot &&
+          previousWallClock !== null &&
+          previousMonotonic !== null &&
+          Math.abs(
+            (wallClockTimestamp - previousWallClock) -
+              (monotonicTimestamp - previousMonotonic),
+          ) > CLOCK_DRIFT_TOLERANCE_MS;
+        const clockAnomaly = wallClockWentBack || deltaMismatch;
         sessionClockAnomaly ||= clockAnomaly;
         const currentHash = await Crypto.digestStringAsync(
           Crypto.CryptoDigestAlgorithm.SHA256,
@@ -427,6 +1009,12 @@ export function appendOfflineTrackingPoints(
             point,
             wallClockTimestamp,
             monotonicTimestamp,
+            monotonicSource: clock.monotonicSource,
+            bootId: clock.bootId,
+            lastTrustedServerTime: trustedTime?.server_time ?? null,
+            estimatedTrustedTime,
+            regionId,
+            matchedOffline,
             sensorConfidence,
             createdOffline,
             previousHash,
@@ -436,9 +1024,11 @@ export function appendOfflineTrackingPoints(
         await transaction.runAsync(
           `INSERT OR IGNORE INTO tracking_points
            (session_id, sequence, latitude, longitude, accuracy, speed, heading,
-            wall_clock_timestamp, monotonic_timestamp, sensor_confidence,
+            wall_clock_timestamp, monotonic_timestamp, monotonic_source, boot_id,
+            last_trusted_server_time, estimated_trusted_time, region_id,
+            matched_offline, sensor_confidence,
             created_offline, sensor_json, previous_hash, current_hash, clock_anomaly, accepted)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           session.id,
           sequence,
           point.latitude,
@@ -448,6 +1038,12 @@ export function appendOfflineTrackingPoints(
           point.heading ?? null,
           wallClockTimestamp,
           monotonicTimestamp,
+          clock.monotonicSource,
+          clock.bootId,
+          trustedTime?.server_time ?? null,
+          estimatedTrustedTime,
+          regionId,
+          matchedOffline ? 1 : 0,
           sensorConfidence,
           createdOffline ? 1 : 0,
           point.sensor ? JSON.stringify(point.sensor) : null,
@@ -459,12 +1055,16 @@ export function appendOfflineTrackingPoints(
         if (point.sensor) {
           await transaction.runAsync(
             `INSERT OR REPLACE INTO sensor_events
-             (session_id, sequence, wall_clock_timestamp, monotonic_timestamp, payload_json)
-             VALUES (?, ?, ?, ?, ?)`,
+             (session_id, sequence, wall_clock_timestamp, monotonic_timestamp,
+              monotonic_source, boot_id, estimated_trusted_time, payload_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             session.id,
             sequence,
             wallClockTimestamp,
             monotonicTimestamp,
+            clock.monotonicSource,
+            clock.bootId,
+            estimatedTrustedTime,
             JSON.stringify(point.sensor),
           );
         }
@@ -475,6 +1075,12 @@ export function appendOfflineTrackingPoints(
           sequence,
           wallClockTimestamp,
           monotonicTimestamp,
+          monotonicSource: clock.monotonicSource,
+          bootId: clock.bootId,
+          lastTrustedServerTime: trustedTime?.server_time ?? null,
+          estimatedTrustedTime,
+          regionId,
+          matchedOffline,
           sensorConfidence,
           createdOffline,
           previousHash,
@@ -484,19 +1090,32 @@ export function appendOfflineTrackingPoints(
         });
         previousHash = currentHash;
         previousWallClock = wallClockTimestamp;
+        previousMonotonic = monotonicTimestamp;
+        previousBootId = clock.bootId;
       }
       await transaction.runAsync(
         `UPDATE tracking_sessions
          SET last_sequence = ?, last_hash = ?, last_wall_clock = ?,
+             last_monotonic = ?, last_boot_id = ?, monotonic_source = ?,
              clock_anomaly = ?, created_offline = MAX(created_offline, ?)
          WHERE id = ?`,
         sequence,
         previousHash,
         previousWallClock,
+        previousMonotonic,
+        previousBootId,
+        getMonotonicSnapshot().monotonicSource,
         sessionClockAnomaly ? 1 : 0,
         createdOffline ? 1 : 0,
         session.id,
       );
+    });
+    await enqueueSyncOperationDirect(db, {
+      userId: session.player_id,
+      entityType: "tracking_session",
+      entityId: session.id,
+      action: "UPLOAD_TRACK",
+      payload: { sessionId: session.id, throughSequence: sequence },
     });
     return stored;
   });
@@ -510,7 +1129,7 @@ export function getOfflineTrackingPoints(sessionId?: string) {
       (
         await db.getFirstAsync<{ id: string }>(
           `SELECT id FROM tracking_sessions
-           WHERE status IN ('active', 'pending_sync')
+           WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing', 'pending_sync')
            ORDER BY started_at DESC LIMIT 1`,
         )
       )?.id;
@@ -530,6 +1149,12 @@ export function getOfflineTrackingPoints(sessionId?: string) {
       timestamp: row.wall_clock_timestamp,
       wallClockTimestamp: row.wall_clock_timestamp,
       monotonicTimestamp: row.monotonic_timestamp,
+      monotonicSource: row.monotonic_source,
+      bootId: row.boot_id,
+      lastTrustedServerTime: row.last_trusted_server_time,
+      estimatedTrustedTime: row.estimated_trusted_time,
+      regionId: row.region_id,
+      matchedOffline: row.matched_offline === 1,
       sensorConfidence: row.sensor_confidence,
       createdOffline: row.created_offline === 1,
       sensor: row.sensor_json
@@ -549,6 +1174,7 @@ export function saveOfflineTerritories(territories: Territory[]) {
     const db = await openDatabase();
     await db.withExclusiveTransactionAsync(async (transaction) => {
       for (const territory of territories) {
+        const queuedAt = Date.now();
         await transaction.runAsync(
           `INSERT OR REPLACE INTO territories
            (id, signature, player_id, created_at, payload_json)
@@ -559,6 +1185,27 @@ export function saveOfflineTerritories(territories: Territory[]) {
           territory.createdAt,
           JSON.stringify(territory),
         );
+        await transaction.runAsync(
+          `INSERT INTO sync_queue
+           (id, user_id, entity_type, entity_id, action, payload_json, status,
+            attempts, created_at, updated_at)
+           VALUES (?, ?, 'territory', ?, 'CREATE_TERRITORY', ?, 'pending', 0, ?, ?)
+           ON CONFLICT(entity_type, entity_id, action) DO UPDATE SET
+             id = excluded.id,
+             user_id = excluded.user_id,
+             payload_json = excluded.payload_json,
+             status = 'pending',
+             attempts = 0,
+             last_attempt_at = NULL,
+             last_error = NULL,
+             updated_at = excluded.updated_at`,
+          `CREATE_TERRITORY:territory:${territory.id}:${queuedAt}`,
+          territory.playerId,
+          territory.id,
+          JSON.stringify({ territoryId: territory.id }),
+          territory.createdAt,
+          queuedAt,
+        );
         const segmentIds = [
           ...new Set(
             territory.coordinates
@@ -568,12 +1215,59 @@ export function saveOfflineTerritories(territories: Territory[]) {
         ];
         for (const segmentId of segmentIds) {
           await transaction.runAsync(
-            "UPDATE road_cache SET pinned = 1 WHERE id = ?",
+            `UPDATE road_cache_regions SET pinned = 1
+             , pinned_reason = 'territory', priority = MAX(priority, 100)
+             WHERE region_id = (
+               SELECT region_id FROM road_cache_segment_index WHERE segment_id = ?
+             )`,
             segmentId,
           );
         }
       }
     });
+  });
+}
+
+/** Restaura copias del usuario autenticado sin crear otra operacion de subida. */
+export function restoreOfflineTerritories(territories: Territory[]) {
+  if (territories.length === 0) return Promise.resolve();
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    await db.withExclusiveTransactionAsync(async (transaction) => {
+      for (const territory of territories) {
+        await transaction.runAsync(
+          `INSERT INTO territories (id, signature, player_id, created_at, payload_json)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             signature = excluded.signature,
+             player_id = excluded.player_id,
+             created_at = excluded.created_at,
+             payload_json = excluded.payload_json`,
+          territory.id,
+          territory.signature,
+          territory.playerId,
+          territory.createdAt,
+          JSON.stringify(territory),
+        );
+      }
+    });
+  });
+}
+
+export function deleteOfflineTerritories(ids: string[]) {
+  if (ids.length === 0) return Promise.resolve();
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const placeholders = ids.map(() => "?").join(",");
+    await db.runAsync(
+      `DELETE FROM territories WHERE id IN (${placeholders})`,
+      ...ids,
+    );
+    await db.runAsync(
+      `DELETE FROM sync_queue WHERE entity_type = 'territory'
+       AND entity_id IN (${placeholders})`,
+      ...ids,
+    );
   });
 }
 
@@ -616,16 +1310,30 @@ export function savePendingTerritory(
       updatedAt,
     );
     if (record.status === "pending_validation") {
-      await db.runAsync(
-        `INSERT OR IGNORE INTO sync_queue
-         (id, entity_type, entity_id, action, payload_json, status, attempts, created_at, updated_at)
-         VALUES (?, 'tracking_session', ?, 'validate', ?, 'pending', 0, ?, ?)`,
-        `validate-${record.sessionId}`,
+      const pendingRegionIds = [
+        ...new Set(record.rawTrack.map(coordinateRegionId)),
+      ];
+      for (const regionId of pendingRegionIds) {
+        await db.runAsync(
+          `UPDATE road_cache_regions
+           SET pinned = 1, pinned_reason = 'pending_validation',
+               priority = MAX(priority, 90)
+           WHERE region_id = ?`,
+          regionId,
+        );
+      }
+      const session = await db.getFirstAsync<{ player_id: string }>(
+        "SELECT player_id FROM tracking_sessions WHERE id = ?",
         record.sessionId,
-        JSON.stringify({ pendingTerritoryId: record.id }),
-        record.createdAt,
-        updatedAt,
       );
+      await enqueueSyncOperationDirect(db, {
+        userId: session?.player_id ?? "",
+        entityType: "pending_territory",
+        entityId: record.id,
+        action: "VALIDATE_TERRITORY",
+        payload: { pendingTerritoryId: record.id, sessionId: record.sessionId },
+        createdAt: record.createdAt,
+      });
     }
   });
 }
@@ -661,10 +1369,21 @@ export function resolvePendingTerritory(
 ) {
   return serializeOperation(async () => {
     const db = await openDatabase();
-    const row = await db.getFirstAsync<{ session_id: string }>(
-      "SELECT session_id FROM pending_territories WHERE id = ?",
+    const row = await db.getFirstAsync<{
+      session_id: string;
+      raw_track_json: string;
+      session_status: OfflineSessionStatus;
+    }>(
+      `SELECT pending.session_id, pending.raw_track_json,
+              session.status AS session_status
+       FROM pending_territories AS pending
+       JOIN tracking_sessions AS session ON session.id = pending.session_id
+       WHERE pending.id = ?`,
       id,
     );
+    if (!row || isActiveOfflineSessionStatus(row.session_status)) {
+      return false;
+    }
     await db.runAsync(
       "UPDATE pending_territories SET status = ?, updated_at = ? WHERE id = ?",
       status,
@@ -672,70 +1391,116 @@ export function resolvePendingTerritory(
       id,
     );
     if (row) {
+      try {
+        const rawTrack = JSON.parse(row.raw_track_json) as RawTrackPoint[];
+        for (const regionId of new Set(rawTrack.map(coordinateRegionId))) {
+          await db.runAsync(
+            `UPDATE road_cache_regions
+             SET pinned = 0, pinned_reason = NULL, priority = 10
+             WHERE region_id = ? AND pinned_reason = 'pending_validation'`,
+            regionId,
+          );
+        }
+      } catch {
+        // La validacion ya termino; metadata de cache dañada no afecta el territorio.
+      }
       await db.runAsync(
         `UPDATE sync_queue SET status = 'done', updated_at = ?
-         WHERE entity_type = 'tracking_session' AND entity_id = ?`,
+         WHERE entity_type = 'pending_territory' AND entity_id = ?
+           AND action = 'VALIDATE_TERRITORY'`,
         Date.now(),
-        row.session_id,
+        id,
       );
       await db.runAsync(
-        `UPDATE tracking_sessions SET status = 'synced', pending_road_match = 0
-         WHERE id = ?`,
+        `UPDATE tracking_sessions SET status = 'completed', pending_road_match = 0
+         WHERE id = ? AND status NOT IN
+           ('active', 'active_local', 'active_offline', 'active_syncing')`,
         row.session_id,
       );
     }
+    return true;
   });
 }
 
-export function saveRoadSegmentsToCache(segments: RoadSegment[]) {
+export function saveRoadSegmentsToCache(
+  segments: RoadSegment[],
+  options?: {
+    regionId?: string;
+    coverageStatus?: RoadCacheRegionRow["coverage_status"];
+    priority?: number;
+  },
+) {
   if (segments.length === 0) return Promise.resolve();
   return serializeOperation(async () => {
     const db = await openDatabase();
     const now = Date.now();
-    await db.withExclusiveTransactionAsync(async (transaction) => {
-      for (const segment of segments) {
-        if (segment.coordinates.length < 2) continue;
-        const latitudes = segment.coordinates.map((point) => point.latitude);
-        const longitudes = segment.coordinates.map((point) => point.longitude);
-        await transaction.runAsync(
-          `INSERT INTO road_cache
-           (id, segment_json, min_lat, max_lat, min_lon, max_lon, last_accessed, expires_at, pinned)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-           ON CONFLICT(id) DO UPDATE SET
-             segment_json = excluded.segment_json,
-             min_lat = excluded.min_lat,
-             max_lat = excluded.max_lat,
-             min_lon = excluded.min_lon,
-             max_lon = excluded.max_lon,
-             last_accessed = excluded.last_accessed,
-             expires_at = excluded.expires_at`,
-          segment.id,
-          JSON.stringify(segment),
-          Math.min(...latitudes),
-          Math.max(...latitudes),
-          Math.min(...longitudes),
-          Math.max(...longitudes),
-          now,
-          now + ROAD_CACHE_TTL_MS,
+    const incomingRegions = new Map<string, RoadSegment[]>();
+    for (const segment of segments) {
+      if (segment.coordinates.length < 2) continue;
+      const regionId = options?.regionId ?? roadRegionId(segment);
+      const region = incomingRegions.get(regionId) ?? [];
+      region.push(segment);
+      incomingRegions.set(regionId, region);
+    }
+    for (const [regionId, incoming] of incomingRegions) {
+      const existingRow = await db.getFirstAsync<RoadCacheRegionRow>(
+        "SELECT * FROM road_cache_regions WHERE region_id = ?",
+        regionId,
+      );
+      const existing = existingRow && options?.coverageStatus !== "complete"
+        ? await readRoadCacheBlock(regionId, existingRow.content_hash)
+        : null;
+      const merged = new Map<string, RoadSegment>();
+      for (const segment of existing ?? []) merged.set(segment.id, segment);
+      for (const segment of incoming) merged.set(segment.id, segment);
+      const requiredPin = existingRow?.pinned === 1
+        ? { pinned: true, reason: existingRow.pinned_reason }
+        : await getRequiredRoadRegionPin(db, regionId);
+      await persistRoadRegion(
+        db,
+        regionId,
+        [...merged.values()],
+        requiredPin.pinned,
+        now,
+        options?.coverageStatus ?? existingRow?.coverage_status ?? "partial",
+        requiredPin.reason,
+      );
+      if (options?.priority !== undefined) {
+        await db.runAsync(
+          "UPDATE road_cache_regions SET priority = MAX(priority, ?) WHERE region_id = ?",
+          options.priority,
+          regionId,
         );
       }
-    });
+    }
     await pruneRoadCache(db, now);
   });
 }
 
 async function pruneRoadCache(db: SQLite.SQLiteDatabase, now = Date.now()) {
-  await db.runAsync(
-    "DELETE FROM road_cache WHERE pinned = 0 AND expires_at < ?",
-    now,
+  const rows = await db.getAllAsync<RoadCacheRegionRow>(
+    `SELECT * FROM road_cache_regions
+     ORDER BY pinned DESC, priority DESC, last_accessed DESC`,
   );
-  await db.runAsync(
-    `DELETE FROM road_cache WHERE id IN (
-       SELECT id FROM road_cache WHERE pinned = 0
-       ORDER BY last_accessed DESC LIMIT -1 OFFSET ?
-     )`,
-    ROAD_CACHE_MAX_SEGMENTS,
-  );
+  let retainedRegions = rows.length;
+  let retainedBytes = rows.reduce((total, row) => total + row.size_bytes, 0);
+  let lowStorage = getAvailableStorageBytes() < REGIONAL_CACHE_CONFIG.lowStorageThresholdBytes;
+  for (const row of [...rows].reverse()) {
+    const exceedsLimit =
+      row.pinned === 0 &&
+      (retainedRegions > ROAD_CACHE_MAX_REGIONS ||
+        retainedBytes > ROAD_CACHE_MAX_BYTES ||
+        (lowStorage && row.priority <= 10));
+    if (!exceedsLimit) continue;
+    deleteRoadCacheBlock(row.region_id);
+    await db.runAsync(
+      "DELETE FROM road_cache_regions WHERE region_id = ?",
+      row.region_id,
+    );
+    retainedRegions -= 1;
+    retainedBytes -= row.size_bytes;
+    lowStorage = getAvailableStorageBytes() < REGIONAL_CACHE_CONFIG.lowStorageThresholdBytes;
+  }
 }
 
 export function getRoadSegmentsNearTrack(
@@ -749,21 +1514,19 @@ export function getRoadSegmentsNearTrack(
     const maxLat = Math.max(...track.map((point) => point.latitude)) + paddingDegrees;
     const minLon = Math.min(...track.map((point) => point.longitude)) - paddingDegrees;
     const maxLon = Math.max(...track.map((point) => point.longitude)) + paddingDegrees;
-    const rows = await db.getAllAsync<{ id: string; segment_json: string }>(
-      `SELECT id, segment_json FROM road_cache
+    const rows = await db.getAllAsync<RoadCacheRegionRow>(
+      `SELECT * FROM road_cache_regions
        WHERE max_lat >= ? AND min_lat <= ? AND max_lon >= ? AND min_lon <= ?
-         AND (pinned = 1 OR expires_at >= ?)
        ORDER BY last_accessed DESC`,
       minLat,
       maxLat,
       minLon,
       maxLon,
-      Date.now(),
     );
     if (rows.length > 0) {
       const accessedAt = Date.now();
       await db.runAsync(
-        `UPDATE road_cache SET last_accessed = ?
+        `UPDATE road_cache_regions SET last_accessed = ?
          WHERE max_lat >= ? AND min_lat <= ? AND max_lon >= ? AND min_lon <= ?`,
         accessedAt,
         minLat,
@@ -772,13 +1535,62 @@ export function getRoadSegmentsNearTrack(
         maxLon,
       );
     }
-    return rows.flatMap<RoadSegment>((row) => {
-      try {
-        return [JSON.parse(row.segment_json) as RoadSegment];
-      } catch {
-        return [];
+    const segments = new Map<string, RoadSegment>();
+    for (const row of rows) {
+      const block = await readRoadCacheBlock(row.region_id, row.content_hash);
+      if (!block) {
+        deleteRoadCacheBlock(row.region_id);
+        await db.runAsync(
+          "DELETE FROM road_cache_regions WHERE region_id = ?",
+          row.region_id,
+        );
+        continue;
       }
+      if (row.expires_at < Date.now() && row.coverage_status !== "stale") {
+        await db.runAsync(
+          "UPDATE road_cache_regions SET coverage_status = 'stale' WHERE region_id = ?",
+          row.region_id,
+        );
+      }
+      for (const segment of block) segments.set(segment.id, segment);
+    }
+    return [...segments.values()];
+  });
+}
+
+export function getRoadCacheCoverage(
+  track: Array<{ latitude: number; longitude: number }>,
+) {
+  return serializeOperation(async () => {
+    if (track.length === 0) {
+      return { sufficient: false, regionIds: [], missingRegionIds: [] };
+    }
+    const db = await openDatabase();
+    const regionIds = [...new Set(track.map(coordinateRegionId))];
+    const rows = await db.getAllAsync<{
+      region_id: string;
+      coverage_status: RoadCacheRegionRow["coverage_status"];
+      expires_at: number;
+    }>(
+      `SELECT region_id, coverage_status, expires_at FROM road_cache_regions
+       WHERE region_id IN (${regionIds.map(() => "?").join(",")})`,
+      ...regionIds,
+    );
+    const statusByRegion = new Map(
+      rows.map((row) => [
+        row.region_id,
+        row.expires_at < Date.now() ? "stale" : row.coverage_status,
+      ]),
+    );
+    const missingRegionIds = regionIds.filter((regionId) => {
+      const status = statusByRegion.get(regionId);
+      return status !== "complete" && status !== "stale";
     });
+    return {
+      sufficient: missingRegionIds.length === 0,
+      regionIds,
+      missingRegionIds,
+    };
   });
 }
 
@@ -786,16 +1598,18 @@ export function saveTrustedServerTime(serverTime: number) {
   if (!Number.isFinite(serverTime)) return Promise.resolve();
   return serializeOperation(async () => {
     const db = await openDatabase();
+    const clock = getMonotonicSnapshot();
     const previous = await db.getFirstAsync<TrustedTimeRow>(
       "SELECT server_time, monotonic_time, boot_id FROM trusted_time WHERE singleton = 1",
     );
-    if (previous?.boot_id === bootId) {
+    if (previous?.boot_id === clock.bootId) {
       const estimated =
-        previous.server_time + Math.max(0, monotonicNow() - previous.monotonic_time);
+        previous.server_time +
+        Math.max(0, clock.monotonicTimestamp - previous.monotonic_time);
       if (Math.abs(serverTime - estimated) > 2 * 60 * 1_000) {
         await db.runAsync(
           `UPDATE tracking_sessions SET clock_anomaly = 1
-           WHERE status IN ('active', 'pending_sync')`,
+           WHERE status IN ('active', 'active_local', 'active_offline', 'active_syncing', 'pending_sync')`,
         );
       }
     }
@@ -804,8 +1618,8 @@ export function saveTrustedServerTime(serverTime: number) {
        (singleton, server_time, monotonic_time, boot_id, updated_at)
        VALUES (1, ?, ?, ?, ?)`,
       serverTime,
-      monotonicNow(),
-      bootId,
+      clock.monotonicTimestamp,
+      clock.bootId,
       Date.now(),
     );
   });
@@ -818,8 +1632,12 @@ export function getEstimatedTrustedTime() {
       "SELECT server_time, monotonic_time, boot_id FROM trusted_time WHERE singleton = 1",
     );
     if (!row) return null;
-    if (row.boot_id !== bootId) return row.server_time;
-    return row.server_time + Math.max(0, monotonicNow() - row.monotonic_time);
+    const clock = getMonotonicSnapshot();
+    if (row.boot_id !== clock.bootId) return row.server_time;
+    return (
+      row.server_time +
+      Math.max(0, clock.monotonicTimestamp - row.monotonic_time)
+    );
   });
 }
 
@@ -838,6 +1656,12 @@ export function verifySessionHashChain(sessionId: string) {
           point,
           wallClockTimestamp: point.wallClockTimestamp,
           monotonicTimestamp: point.monotonicTimestamp,
+          monotonicSource: point.monotonicSource,
+          bootId: point.bootId,
+          lastTrustedServerTime: point.lastTrustedServerTime,
+          estimatedTrustedTime: point.estimatedTrustedTime,
+          regionId: point.regionId,
+          matchedOffline: point.matchedOffline,
           sensorConfidence: point.sensorConfidence,
           createdOffline: point.createdOffline,
           previousHash,
@@ -868,6 +1692,12 @@ async function getOfflineTrackingPointsDirect(sessionId: string) {
     timestamp: row.wall_clock_timestamp,
     wallClockTimestamp: row.wall_clock_timestamp,
     monotonicTimestamp: row.monotonic_timestamp,
+    monotonicSource: row.monotonic_source,
+    bootId: row.boot_id,
+    lastTrustedServerTime: row.last_trusted_server_time,
+    estimatedTrustedTime: row.estimated_trusted_time,
+    regionId: row.region_id,
+    matchedOffline: row.matched_offline === 1,
     sensorConfidence: row.sensor_confidence,
     createdOffline: row.created_offline === 1,
     sensor: row.sensor_json ? JSON.parse(row.sensor_json) as SensorEvidence : undefined,
@@ -878,6 +1708,112 @@ async function getOfflineTrackingPointsDirect(sessionId: string) {
   }));
 }
 
+function syncOperationFromRow(row: SyncQueueRow): SyncQueueOperation {
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return {
+    id: row.id,
+    userId: row.user_id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    action: row.action,
+    payload,
+    status: row.status,
+    attempts: row.attempts,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastAttemptAt: row.last_attempt_at,
+    lastError: row.last_error,
+  };
+}
+
+export function getPendingSyncOperations(limit = 25) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const rows = await db.getAllAsync<SyncQueueRow>(
+      `SELECT * FROM sync_queue
+       WHERE status = 'pending' AND action <> 'VALIDATE_TERRITORY'
+       ORDER BY created_at, id LIMIT ?`,
+      Math.max(1, Math.min(limit, 100)),
+    );
+    return rows.map(syncOperationFromRow);
+  });
+}
+
+export function markSyncOperationProcessing(id: string) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    await db.runAsync(
+      `UPDATE sync_queue
+       SET status = 'processing', attempts = attempts + 1,
+           last_attempt_at = ?, last_error = NULL, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+      Date.now(),
+      Date.now(),
+      id,
+    );
+  });
+}
+
+export function markSyncOperationPending(id: string, errorMessage?: string) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    await db.runAsync(
+      `UPDATE sync_queue SET status = 'pending', last_error = ?, updated_at = ?
+       WHERE id = ?`,
+      errorMessage?.slice(0, 500) ?? null,
+      Date.now(),
+      id,
+    );
+  });
+}
+
+export function markSyncOperationDone(id: string) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    await db.runAsync(
+      "UPDATE sync_queue SET status = 'done', updated_at = ? WHERE id = ?",
+      Date.now(),
+      id,
+    );
+  });
+}
+
+export function buildSyncOperationPayload(operation: SyncQueueOperation) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    if (operation.entityType === "territory") {
+      const territory = await db.getFirstAsync<{ payload_json: string }>(
+        "SELECT payload_json FROM territories WHERE id = ?",
+        operation.entityId,
+      );
+      return territory ? JSON.parse(territory.payload_json) : operation.payload;
+    }
+    if (operation.entityType === "tracking_session") {
+      const session = await db.getFirstAsync<SessionRow>(
+        "SELECT * FROM tracking_sessions WHERE id = ?",
+        operation.entityId,
+      );
+      if (!session) return operation.payload;
+      const points = await getOfflineTrackingPointsDirect(operation.entityId);
+      return {
+        session: sessionFromRow(session),
+        points,
+        integrity: {
+          lastSequence: session.last_sequence,
+          lastHash: session.last_hash,
+          clockAnomaly: session.clock_anomaly === 1,
+        },
+      };
+    }
+    return operation.payload;
+  });
+}
+
 export function getOfflineStorageStats() {
   return serializeOperation(async () => {
     const db = await openDatabase();
@@ -886,17 +1822,42 @@ export function getOfflineStorageStats() {
       db.getFirstAsync<{ count: number }>("SELECT COUNT(*) AS count FROM tracking_points"),
       db.getFirstAsync<{ count: number }>("SELECT COUNT(*) AS count FROM territories"),
       db.getFirstAsync<{ count: number }>("SELECT COUNT(*) AS count FROM pending_territories WHERE status = 'pending_validation'"),
-      db.getFirstAsync<{ count: number; bytes: number }>("SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(segment_json)), 0) AS bytes FROM road_cache"),
+      db.getFirstAsync<{ count: number; bytes: number }>("SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM road_cache_regions"),
       db.getFirstAsync<{ page_count: number }>("PRAGMA page_count"),
       db.getFirstAsync<{ page_size: number }>("PRAGMA page_size"),
+      db.getFirstAsync<{ bytes: number }>("SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM territories"),
+      db.getFirstAsync<{ bytes: number }>(
+        `SELECT
+           (SELECT COUNT(*) * 160 FROM tracking_points) +
+           (SELECT COALESCE(SUM(LENGTH(sensor_json)), 0) FROM tracking_points) +
+           (SELECT COALESCE(SUM(LENGTH(raw_track_json) + LENGTH(COALESCE(sensor_evidence_json, ''))), 0) FROM pending_territories)
+           AS bytes`,
+      ),
+      db.getFirstAsync<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM sync_queue WHERE status <> 'done'",
+      ),
     ]);
+    const sqliteBytes =
+      (counts[5]?.page_count ?? 0) * (counts[6]?.page_size ?? 0);
+    const roadCacheBytes = Math.max(
+      counts[4]?.bytes ?? 0,
+      getRoadCacheFilesSize(),
+    );
+    const territoriesBytes = counts[7]?.bytes ?? 0;
+    const tracksBytes = counts[8]?.bytes ?? 0;
     return {
       trackingSessionsCount: counts[0]?.count ?? 0,
       trackingPointsCount: counts[1]?.count ?? 0,
       territoriesCount: counts[2]?.count ?? 0,
       pendingTerritoriesCount: counts[3]?.count ?? 0,
-      roadCacheSize: counts[4]?.bytes ?? 0,
-      localStorageUsed: (counts[5]?.page_count ?? 0) * (counts[6]?.page_size ?? 0),
+      roadCacheSize: roadCacheBytes,
+      localStorageUsed: sqliteBytes,
+      territoriesSize: territoriesBytes,
+      tracksSize: tracksBytes,
+      importantDataSize: sqliteBytes,
+      totalSize: sqliteBytes + roadCacheBytes,
+      pendingSyncCount: counts[9]?.count ?? 0,
+      roadCacheRegionCount: counts[4]?.count ?? 0,
     } satisfies OfflineStorageStats;
   });
 }
@@ -904,6 +1865,18 @@ export function getOfflineStorageStats() {
 export function clearRegenerableRoadCache() {
   return serializeOperation(async () => {
     const db = await openDatabase();
-    await db.runAsync("DELETE FROM road_cache WHERE pinned = 0");
+    const rows = await db.getAllAsync<{ region_id: string }>(
+      "SELECT region_id FROM road_cache_regions WHERE pinned = 0",
+    );
+    for (const row of rows) deleteRoadCacheBlock(row.region_id);
+    await db.runAsync("DELETE FROM road_cache_regions WHERE pinned = 0");
+    await db.runAsync("DELETE FROM road_cache");
+    if (
+      (await db.getFirstAsync<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM road_cache_regions",
+      ))?.count === 0
+    ) {
+      clearRoadCacheFiles();
+    }
   });
 }

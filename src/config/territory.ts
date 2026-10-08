@@ -84,3 +84,14 @@ export const SHIELD_RULES = {
 export const STORAGE_RULES = {
   maximumTerritories: 500,
 } as const;
+
+export const GLOBAL_MULTIPLAYER_RULES = {
+  captureRule: "full_perimeter_required",
+  presencePublishIntervalMs: 3_000,
+  presencePersistenceIntervalMs: 3_000,
+  presenceMaximumAgeMs: 30_000,
+  territoryPageSize: 200,
+  maximumTerritoryPages: 5,
+  regionSubscriptionRadius: 1,
+  maximumActiveRegionalChannels: 9,
+} as const;

@@ -9,6 +9,7 @@ import {
   getOfflineTrackingPoints,
   getRecoverableTrackingSession,
   initializeOfflineStorage,
+  setActiveTrackingConnectionStatus,
   setTrackingSessionStatus,
 } from "@/services/offline-storage";
 import type { SensorEvidence } from "@/types/game";
@@ -107,7 +108,9 @@ async function migrateLegacyRouteOnce() {
       );
       await appendOfflineTrackingPoints(points, true);
       await setTrackingSessionStatus(
-        parsedSession?.pendingRoadMatch === true ? "pending_sync" : "active",
+        parsedSession?.pendingRoadMatch === true
+          ? "pending_sync"
+          : "active_local",
         typeof parsedSession?.stoppedAt === "number"
           ? parsedSession.stoppedAt
           : null,
@@ -181,7 +184,14 @@ export async function markStoredRoutePending(stoppedAt = Date.now()) {
 
 export async function markStoredRouteActive() {
   await ensureStorageReady();
-  await setTrackingSessionStatus("active", null, false);
+  await setTrackingSessionStatus("active_local", null, false);
+}
+
+export async function markStoredRouteConnectionState(
+  state: "active_local" | "active_offline" | "active_syncing",
+) {
+  await ensureStorageReady();
+  await setActiveTrackingConnectionStatus(state);
 }
 
 export async function clearStoredRouteSession() {

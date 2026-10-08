@@ -8,6 +8,9 @@ import android.hardware.SensorManager
 import android.hardware.TriggerEvent
 import android.hardware.TriggerEventListener
 import android.os.Bundle
+import android.os.SystemClock
+import android.provider.Settings
+import android.net.Uri
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -57,6 +60,20 @@ class PaintFootAndroidSensorsModule : Module(), SensorEventListener {
 
     AsyncFunction("getCapabilitiesAsync") {
       sensorSpecs.map { capabilityFor(it) }
+    }
+
+    AsyncFunction("getRuntimeStorageInfoAsync") {
+      val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()
+      val bootCount = try {
+        Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT)
+      } catch (_: Settings.SettingNotFoundException) {
+        -1
+      }
+      mapOf(
+        "elapsedRealtimeMs" to SystemClock.elapsedRealtime().toDouble(),
+        "bootId" to if (bootCount >= 0) "android-boot-$bootCount" else "android-boot-unknown",
+        "externalFilesUri" to context.getExternalFilesDir(null)?.let { Uri.fromFile(it).toString() },
+      )
     }
 
     AsyncFunction("startAsync") { sensorIds: List<String>, updateIntervalMs: Int ->

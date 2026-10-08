@@ -83,7 +83,13 @@ export default function PaymentsScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#101426" },
-  content: { paddingHorizontal: 16, gap: 16 },
+  content: {
+    width: "100%",
+    maxWidth: 720,
+    alignSelf: "center",
+    paddingHorizontal: 16,
+    gap: 16,
+  },
   header: { gap: 4 },
   title: { color: "#FFFFFF", fontSize: 24, fontWeight: "800" },
   subtitle: { color: "#AAB2CF", fontSize: 13 },

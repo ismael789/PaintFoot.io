@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "PaintFoot.io",
-    "slug": "PaintFoot.io",
+    "slug": "PaintFoot-io",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./Zapatilla geométrica en plena carrera.png",
@@ -45,6 +45,12 @@
         "expo-sensors",
         {
           "motionPermission": "Permite que PaintFoot.io use los sensores de movimiento para mejorar el ajuste del recorrido a las calles."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Permite que PaintFoot.io use Face ID para confirmar compras de escudos."
         }
       ],
       [

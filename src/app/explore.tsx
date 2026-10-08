@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -57,6 +58,8 @@ function SensorRow({ sensor }: { sensor: SensorCapabilityState }) {
 
 export default function DeviceSensorsScreen() {
   const insets = useSafeAreaInsets();
+  const { width, fontScale } = useWindowDimensions();
+  const compactLayout = width < 380 || fontScale > 1.15;
   const sensors = useSyncExternalStore(
     sensorCapabilityManager.subscribe,
     sensorCapabilityManager.getSnapshot,
@@ -102,7 +105,7 @@ export default function DeviceSensorsScreen() {
         { paddingTop: insets.top + 18, paddingBottom: insets.bottom + 110 },
       ]}
     >
-      <View style={styles.header}>
+      <View style={[styles.header, compactLayout && styles.headerCompact]}>
         <View style={styles.headerText}>
           <Text style={styles.title}>Sensores del dispositivo</Text>
           <Text style={styles.subtitle}>
@@ -173,12 +176,13 @@ export default function DeviceSensorsScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#101426" },
-  content: { paddingHorizontal: 16, gap: 18 },
+  content: { width: "100%", maxWidth: 720, alignSelf: "center", paddingHorizontal: 16, gap: 18 },
   header: { flexDirection: "row", alignItems: "center", gap: 12 },
+  headerCompact: { alignItems: "stretch", flexDirection: "column" },
   headerText: { flex: 1 },
   title: { color: "#FFFFFF", fontSize: 24, fontWeight: "800" },
   subtitle: { color: "#AAB2CF", fontSize: 13, marginTop: 4 },
-  refreshButton: { backgroundColor: "#3949AB", borderRadius: 10, minWidth: 92, paddingHorizontal: 12, paddingVertical: 10, alignItems: "center" },
+  refreshButton: { backgroundColor: "#3949AB", borderRadius: 10, minWidth: 92, minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, alignItems: "center", justifyContent: "center" },
   refreshText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
   summaryCard: { backgroundColor: "#1A1A2E", borderRadius: 18, padding: 16, gap: 6 },
   summaryTitle: { color: "#FFFFFF", fontSize: 18, fontWeight: "800" },
@@ -193,9 +197,9 @@ const styles = StyleSheet.create({
   sensorRow: { flexDirection: "row", padding: 14, gap: 10, borderBottomColor: "#292B46", borderBottomWidth: StyleSheet.hairlineWidth },
   sensorIcon: { fontSize: 16, width: 24 },
   sensorContent: { flex: 1, gap: 2 },
-  sensorTitleRow: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
+  sensorTitleRow: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 8 },
   sensorName: { color: "#FFFFFF", fontSize: 14, fontWeight: "700", flex: 1 },
-  sensorValue: { color: "#80CBC4", fontSize: 12, fontWeight: "700" },
+  sensorValue: { color: "#80CBC4", fontSize: 12, fontWeight: "700", flexShrink: 1, textAlign: "right" },
   sensorStatus: { fontSize: 12, fontWeight: "700" },
   sensorPurpose: { color: "#AAB2CF", fontSize: 11, lineHeight: 16 },
   sensorDetails: { color: "#7982A2", fontSize: 10 },

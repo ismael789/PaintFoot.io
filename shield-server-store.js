@@ -11,6 +11,7 @@ function createEmptyState() {
     shields: {},
     freeClaims: {},
     processedPayments: {},
+    purchasedShields: {},
   };
 }
 
@@ -86,7 +87,56 @@ class ShieldServerStore {
       free_last_claimed_at: lastClaimedAt,
       free_available_at: freeAvailableAt,
       free_available: now >= freeAvailableAt,
+      purchased_shields: [...(this.state.purchasedShields[playerId] || [])],
     };
+  }
+
+  storePurchasedShield({ playerId, durationHours, productId, paymentId, now = Date.now() }) {
+    this.getPlayerStatus(playerId, now);
+    if (!Number.isInteger(durationHours) || durationHours <= 0 || durationHours > MAX_SHIELD_DURATION_HOURS) {
+      throw httpError("Duracion de escudo no permitida");
+    }
+    const processed = this.state.processedPayments[paymentId];
+    if (processed?.type === "purchased_shield") return processed.purchasedShield;
+
+    const purchasedShield = {
+      id: paymentId,
+      durationHours,
+      productId,
+      purchasedAt: now,
+    };
+    const current = this.state.purchasedShields[playerId] || [];
+    this.state.purchasedShields[playerId] = [
+      ...current.filter((item) => item.id !== paymentId),
+      purchasedShield,
+    ];
+    this.state.processedPayments[paymentId] = { type: "purchased_shield", purchasedShield };
+    this.save();
+    return purchasedShield;
+  }
+
+  activatePurchasedShield({ territoryId, playerId, purchasedShieldId, now = Date.now() }) {
+    this.assertOwnership(territoryId, playerId);
+    const redemptionId = `redeem_${purchasedShieldId}`;
+    const alreadyRedeemed = this.state.processedPayments[redemptionId];
+    if (alreadyRedeemed?.type === "activated_shield") return alreadyRedeemed.shield;
+
+    const purchased = this.state.purchasedShields[playerId] || [];
+    const credit = purchased.find((item) => item.id === purchasedShieldId);
+    if (!credit) throw httpError("El escudo comprado no esta disponible", 404);
+
+    const shield = this.activate({
+      territoryId,
+      playerId,
+      durationHours: credit.durationHours,
+      source: "stripe",
+      paymentId: redemptionId,
+      now,
+    });
+    this.state.purchasedShields[playerId] = purchased.filter((item) => item.id !== purchasedShieldId);
+    this.state.processedPayments[redemptionId] = { type: "activated_shield", shield };
+    this.save();
+    return shield;
   }
 
   activate({ territoryId, playerId, durationHours, source, paymentId = null, now = Date.now() }) {
@@ -95,7 +145,8 @@ class ShieldServerStore {
       throw httpError("Duracion de escudo no permitida");
     }
     if (paymentId && this.state.processedPayments[paymentId]) {
-      return this.state.processedPayments[paymentId];
+      const processed = this.state.processedPayments[paymentId];
+      return processed?.type === "activated_shield" ? processed.shield : processed;
     }
 
     const current = this.getActiveShield(territoryId, now);
@@ -107,7 +158,7 @@ class ShieldServerStore {
 
     const shield = { startedAt, expiresAt, durationHours: (expiresAt - startedAt) / HOUR_MS, source, paymentId };
     this.state.shields[territoryId] = shield;
-    if (paymentId) this.state.processedPayments[paymentId] = shield;
+    if (paymentId) this.state.processedPayments[paymentId] = { type: "activated_shield", shield };
     this.save();
     return shield;
   }

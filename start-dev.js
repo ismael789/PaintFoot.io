@@ -1,10 +1,21 @@
 const { spawn } = require("child_process");
-const os = require("os");
 
 // Conservado por compatibilidad: Metro inicia el servidor complementario
 // desde metro.config.js, por lo que aqui solo se inicia Expo.
-const npxCommand = os.platform() === "win32" ? "npx.cmd" : "npx";
-const expo = spawn(npxCommand, ["expo", "start", ...process.argv.slice(2)], {
+const expoCli = require.resolve("expo/bin/cli");
+const forwardedArgs = process.argv.slice(2);
+const hasExplicitPort = forwardedArgs.some(
+  (argument, index) =>
+    argument === "--port" ||
+    argument === "-p" ||
+    argument.startsWith("--port=") ||
+    (index > 0 && ["--port", "-p"].includes(forwardedArgs[index - 1])),
+);
+const expoArgs = [expoCli, "start"];
+if (!hasExplicitPort) expoArgs.push("--port", "0");
+expoArgs.push(...forwardedArgs);
+
+const expo = spawn(process.execPath, expoArgs, {
   stdio: "inherit",
 });
 

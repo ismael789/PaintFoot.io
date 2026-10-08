@@ -6,8 +6,10 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView, type WebViewProps } from "react-native-webview";
 
 const INTRO_ANIMATION_SOURCE = require("../../paintfoot-tenis-responsive.html") as NonNullable<
@@ -20,6 +22,8 @@ type GameIntroProps = {
 };
 
 export function GameIntro({ onComplete }: GameIntroProps) {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
   const [isReady, setIsReady] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const introOpacity = useRef(new Animated.Value(1)).current;
@@ -96,8 +100,16 @@ export function GameIntro({ onComplete }: GameIntroProps) {
         onPress={startGame}
         style={styles.touchSurface}
       >
-        <View style={styles.promptArea} pointerEvents="none">
-          <Animated.View style={[styles.promptPill, { opacity: promptOpacity }]}>
+        <View
+          style={[styles.promptArea, { paddingBottom: Math.max(24, insets.bottom + 24) }]}
+          pointerEvents="none"
+        >
+          <Animated.View
+            style={[
+              styles.promptPill,
+              { maxWidth: Math.max(220, width - 32), opacity: promptOpacity },
+            ]}
+          >
             <Text style={styles.promptText}>Toca para comenzar</Text>
           </Animated.View>
         </View>

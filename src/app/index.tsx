@@ -9,11 +9,14 @@ import {
   Alert,
   AppState,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
 import { TerritoryShieldPanel } from "@/components/territory-shield-panel";
 
@@ -25,6 +28,7 @@ import {
   getStoredRoutePoints,
   getStoredRouteSession,
   markStoredRouteActive,
+  markStoredRouteConnectionState,
   markStoredRoutePending,
   type StoredLocationPoint,
 } from "@/services/background-location";
@@ -34,7 +38,6 @@ import {
 } from "@/services/android-intents";
 import {
   registerForRemotePushNotifications,
-  type PushRegistrationResult,
 } from "@/services/push-notifications";
 import {
   buildRoadGraph,
@@ -48,16 +51,28 @@ import {
   matchTraceFromRoadCache,
 } from "@/services/road-cache";
 import {
+  coordinateRegionId,
   getPendingTerritories,
+  getRecoverableTrackingSession,
+  getTrackingSessionById,
+  isActiveOfflineSessionStatus,
   resolvePendingTerritory,
   savePendingTerritory,
   saveTrustedServerTime,
+  setActiveTrackingCacheCoverage,
   verifySessionHashChain,
 } from "@/services/offline-storage";
+import {
+  getOfflineSyncSnapshot,
+  publishOfflineSyncStatus,
+  synchronizePendingOperations,
+} from "@/services/offline-sync";
+import { showFeedback } from "@/services/global-feedback";
 import { detectProvisionalOfflineCandidate } from "@/services/offline-validation";
 import { MotionSensorTracker } from "@/services/motion-sensors";
 import { AmbientThemeController } from "@/services/sensor-metrics";
 import { sensorCapabilityManager } from "@/services/sensor-capabilities";
+import { buildEndpointCandidates } from "@/services/network-endpoints";
 import {
   createTrackingSessionSummary,
   shouldAcceptRoadTransition,
@@ -70,6 +85,7 @@ import {
 } from "@/services/tracking-stats";
 import {
   DEFAULT_PLAYER_PROFILE,
+  getActivePlayerId,
   getOrCreatePlayerProfile,
 } from "@/services/player-profile";
 import {
@@ -78,9 +94,12 @@ import {
 } from "@/services/territory-detection";
 import {
   appendStoredTerritories,
+  discardStoredPendingCapture,
   getStoredTerritories,
   subscribeToStoredTerritories,
   updateStoredTerritory,
+  resolveStoredGlobalCapture,
+  restoreStoredTerritoriesFromBackup,
 } from "@/services/territory-storage";
 import { canPlayerConquerTerritory } from "@/services/territory-shields";
 import {
@@ -101,6 +120,26 @@ import type {
 import { debugLog } from "@/utils/debug-log";
 import { distanceInMeters } from "@/utils/geo";
 import { MAP_HTML } from "@/services/map-html";
+import { prefetchRoadRegionsNear } from "@/services/regional-road-cache";
+import {
+  confirmGlobalTerritoryCapture,
+  GlobalMultiplayerController,
+  synchronizeGlobalPlayerProfile,
+  synchronizeGlobalTerritoryShield,
+  type GlobalWorldStatus,
+} from "@/services/global-multiplayer";
+import {
+  DEFAULT_MULTIPLAYER_PREFERENCES,
+  getMultiplayerPreferences,
+  type MultiplayerPreferences,
+} from "@/services/multiplayer-preferences";
+import {
+  publishGameSystemStatus,
+  registerGameSystemActions,
+  type BackgroundTrackingStatus,
+  type PushStatus,
+  type RoadMatchStatus,
+} from "@/services/game-system-status";
 
 // ─── Trail Config ────────────────────────────────────────────────
 const TRAIL_COLOR = "#FF4444";
@@ -144,45 +183,6 @@ const MINIMUM_POINT_DISTANCE_METERS =
 const MAX_ACCEPTABLE_SPEED_MPS = TRACKING_RULES.maxAcceptableSpeedMps;
 
 type Coordinate = GeoCoordinate;
-
-type BackgroundTrackingStatus =
-  | "expo-go"
-  | "inactive"
-  | "requesting"
-  | "active"
-  | "denied"
-  | "unavailable";
-
-type PushStatus = "registering" | PushRegistrationResult["status"];
-
-type RoadMatchStatus = "idle" | "waiting" | "matching" | "ready" | "error";
-
-const BACKGROUND_STATUS_LABEL: Record<BackgroundTrackingStatus, string> = {
-  "expo-go": "Segundo plano: disponible solo en el APK",
-  inactive: "Segundo plano: listo para iniciar",
-  requesting: "Segundo plano: esperando permiso",
-  active: "Segundo plano: GPS activo",
-  denied: "Segundo plano: permiso denegado",
-  unavailable: "Segundo plano: no disponible en este dispositivo",
-};
-
-const PUSH_STATUS_LABEL: Record<PushStatus, string> = {
-  registering: "Push: registrando dispositivo",
-  registered: "Push: activo",
-  "expo-go-unsupported": "Push: disponible solo en el APK",
-  "physical-device-required": "Push: requiere un telefono fisico",
-  "permission-denied": "Push: permiso denegado",
-  "missing-project-id": "Push: falta vincular el proyecto EAS",
-  "registration-error": "Push: error de registro",
-};
-
-const ROAD_STATUS_LABEL: Record<RoadMatchStatus, string> = {
-  idle: "Calles: listas para iniciar",
-  waiting: "Calles: esperando puntos GPS",
-  matching: "Calles: ajustando recorrido",
-  ready: "Calles: recorrido ajustado",
-  error: "Sin conexion vial: recorrido guardado y pendiente",
-};
 
 function confirmBackgroundLocation() {
   return new Promise<boolean>((resolve) => {
@@ -230,14 +230,12 @@ function sendPushToken(
   socket.send(JSON.stringify({ type: "push-token", id: playerId, token }));
 }
 
-function getWebSocketUrl() {
-  const configuredUrl = process.env.EXPO_PUBLIC_WS_URL?.trim();
-  if (configuredUrl) return configuredUrl;
-
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (!hostUri) return null;
-
-  return `ws://${hostUri.split(":")[0]}:8082`;
+function getWebSocketUrls() {
+  return buildEndpointCandidates(
+    process.env.EXPO_PUBLIC_WS_URL,
+    Constants.expoConfig?.hostUri,
+    { scheme: "ws", defaultPort: 8082 },
+  );
 }
 
 const DEFAULT_REGION = {
@@ -281,6 +279,9 @@ async function matchCompletePendingTrack(rawTrack: RawTrackPoint[]) {
 }
 
 export default function MapScreen() {
+  const insets = useSafeAreaInsets();
+  const { height, fontScale } = useWindowDimensions();
+  const compactLayout = height < 700 || fontScale > 1.15;
   // ─── State ───────────────────────────────────────────────────
   const [location, setLocation] = useState<Coordinate | null>(null);
   const [routeCoords, setRouteCoords] = useState<Coordinate[]>([]);
@@ -291,6 +292,7 @@ export default function MapScreen() {
   );
   const [roadMatchStatus, setRoadMatchStatus] =
     useState<RoadMatchStatus>("idle");
+  const [roadsUsingCache, setRoadsUsingCache] = useState(false);
   const [rawPointCount, setRawPointCount] = useState(0);
   const [roadSegmentCount, setRoadSegmentCount] = useState(0);
   const [intersectionCount, setIntersectionCount] = useState(0);
@@ -319,7 +321,11 @@ export default function MapScreen() {
     useState<ResolvedTheme>("dark");
   const [latestSession, setLatestSession] =
     useState<TrackingSessionSummary | null>(null);
-  const myPlayerId = playerProfile.id;
+  const [multiplayerPreferences, setMultiplayerPreferences] =
+    useState<MultiplayerPreferences>(DEFAULT_MULTIPLAYER_PREFERENCES);
+  const [worldStatus, setWorldStatus] =
+    useState<GlobalWorldStatus>("local");
+  const myPlayerId = getActivePlayerId(playerProfile);
 
   // ─── Refs ────────────────────────────────────────────────────
   const mapRef = useRef<WebView>(null);
@@ -350,29 +356,186 @@ export default function MapScreen() {
   const sessionAreaM2Ref = useRef(0);
   const isOnlineRef = useRef(true);
   const pendingSyncInFlightRef = useRef(false);
+  const multiplayerPreferencesRef = useRef(multiplayerPreferences);
+  const globalMultiplayerRef = useRef<GlobalMultiplayerController | null>(null);
+  const globalTerritoriesLoadedRef = useRef(false);
+  const nearbyPlayerCountRef = useRef(0);
 
   useEffect(() => {
     isTrackingRef.current = isTracking;
   }, [isTracking]);
 
   useEffect(() => {
+    multiplayerPreferencesRef.current = multiplayerPreferences;
+  }, [multiplayerPreferences]);
+
+  useEffect(() => {
+    const sensorStates = sensorCapabilityManager.getSnapshot();
+    publishGameSystemStatus({
+      backgroundTracking: backgroundTrackingStatus,
+      push: pushStatus,
+      world: worldStatus,
+      roads: roadMatchStatus,
+      roadsUsingCache,
+      gpsAccuracy,
+      gpsAvailable: hasLocationPermission,
+      sensorsAvailable: sensorStates.filter((sensor) => sensor.available).length,
+      sensorsActive: sensorStates.filter((sensor) => sensor.active).length,
+      sensorsTotal: sensorStates.length,
+      online: isOnline,
+      pendingValidation: hasPendingSavedRoute || roadMatchStatus === "pending",
+    });
+  }, [
+    backgroundTrackingStatus,
+    gpsAccuracy,
+    hasLocationPermission,
+    hasPendingSavedRoute,
+    isOnline,
+    pushStatus,
+    roadMatchStatus,
+    roadsUsingCache,
+    sensorEvidence,
+    worldStatus,
+  ]);
+
+  useEffect(() => {
+    const controller = new GlobalMultiplayerController({
+      onTerritories: (globalTerritories) => {
+        void restoreStoredTerritoriesFromBackup(globalTerritories);
+        setTerritories((current) => {
+          if (globalTerritoriesLoadedRef.current) {
+            let gameEvent: { message: string; type: "success" | "warning" | "info" } | null = null;
+            for (const territory of globalTerritories) {
+              const previous = current.find(
+                (item) =>
+                  item.id === territory.id || item.signature === territory.signature,
+              );
+              if (previous && previous.playerId !== territory.playerId) {
+                gameEvent = {
+                  message:
+                    previous.playerId === myPlayerId
+                      ? "Territorio robado por otro jugador"
+                      : territory.playerId === myPlayerId
+                        ? "Territorio robado"
+                        : "Territorio actualizado",
+                  type: previous.playerId === myPlayerId ? "warning" : "success",
+                };
+                break;
+              }
+              if (
+                previous &&
+                previous.status !== "protected" &&
+                territory.status === "protected"
+              ) {
+                gameEvent = { message: "Territorio protegido", type: "warning" };
+              } else if (!previous && !gameEvent) {
+                gameEvent = { message: "Territorio conquistado", type: "success" };
+              }
+            }
+            if (gameEvent) {
+              showFeedback({
+                id: "multiplayer-territory",
+                type: gameEvent.type,
+                message: gameEvent.message,
+              });
+            }
+          }
+          globalTerritoriesLoadedRef.current = true;
+          const bySignature = new Map(
+            current.map((territory) => [territory.signature, territory]),
+          );
+          for (const territory of globalTerritories) {
+            bySignature.set(territory.signature, territory);
+          }
+          return [...bySignature.values()];
+        });
+      },
+      onNearbyPlayers: (players) => {
+        if (players.length !== nearbyPlayerCountRef.current) {
+          nearbyPlayerCountRef.current = players.length;
+          if (players.length > 0) {
+            showFeedback({
+              id: "nearby-players",
+              type: "info",
+              message: "Jugadores cercanos actualizados",
+              cooldownMs: 30_000,
+            });
+          }
+        }
+        const visiblePlayers = players.map((player) => ({
+          ...player,
+          name: multiplayerPreferencesRef.current.showPlayerNames
+            ? player.name
+            : "",
+        }));
+        mapRef.current?.injectJavaScript(
+          `window.setOtherPlayers(${JSON.stringify(visiblePlayers)}); true;`,
+        );
+      },
+      onStatus: (status) => {
+        setWorldStatus(status);
+        if (status === "active") {
+          showFeedback({
+            id: "world-status",
+            type: "success",
+            message: "Mundo global activo",
+            cooldownMs: 30_000,
+          });
+        } else if (status === "connecting") {
+          showFeedback({
+            id: "world-status",
+            type: "info",
+            message: "Reconectando al mundo global",
+          });
+        } else if (status === "offline" && !isOnlineRef.current) {
+          showFeedback({
+            id: "world-status",
+            type: "info",
+            message: "Sin conexión · mundo global pausado",
+          });
+        }
+      },
+    });
+    globalMultiplayerRef.current = controller;
+    return () => {
+      globalMultiplayerRef.current = null;
+      void controller.stop();
+    };
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
       const connected =
         state.isConnected !== false && state.isInternetReachable !== false;
+      const wasOnline = isOnlineRef.current;
       isOnlineRef.current = connected;
       setIsOnline(connected);
+      if (isTrackingRef.current) {
+        void markStoredRouteConnectionState(
+          connected
+            ? wasOnline
+              ? "active_local"
+              : "active_syncing"
+            : "active_offline",
+        );
+      }
     });
     return unsubscribe;
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([getThemePreference(), getLatestTrackingSession()]).then(
-      ([preference, summary]) => {
+    void Promise.all([
+      getThemePreference(),
+      getLatestTrackingSession(),
+      getMultiplayerPreferences(),
+    ]).then(
+      ([preference, summary, globalPreferences]) => {
         if (cancelled) return;
         setThemePreference(preference);
         if (preference !== "auto") setResolvedTheme(preference);
         setLatestSession(summary);
+        setMultiplayerPreferences(globalPreferences);
       },
     );
     return () => {
@@ -420,9 +583,18 @@ export default function MapScreen() {
 
   useFocusEffect(useCallback(() => {
     let cancelled = false;
-    void getOrCreatePlayerProfile().then((profile) => {
-      if (!cancelled) setPlayerProfile(profile);
-    });
+    void Promise.all([
+      getOrCreatePlayerProfile().then(synchronizeGlobalPlayerProfile),
+      getMultiplayerPreferences(),
+      getThemePreference(),
+    ]).then(([profile, preferences, preference]) => {
+        if (!cancelled) {
+          setPlayerProfile(profile);
+          setMultiplayerPreferences(preferences);
+          setThemePreference(preference);
+          if (preference !== "auto") setResolvedTheme(preference);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -455,73 +627,128 @@ export default function MapScreen() {
 
   // ─── Conexión WebSocket ──────────────────────────────────────
   useEffect(() => {
-    if (!myPlayerId || !territoriesLoaded) return;
+    // Supabase Realtime es la autoridad del mundo global. El WebSocket local
+    // queda unicamente como compatibilidad para perfiles sin sesion global.
+    if (!myPlayerId || !territoriesLoaded || playerProfile.globalId) return;
 
     let ws: WebSocket | null = null;
-    try {
-      const wsUrl = getWebSocketUrl();
-      if (wsUrl) {
+    let cancelled = false;
+    let attemptTimeout: ReturnType<typeof setTimeout> | null = null;
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null;
+    const wsUrls = getWebSocketUrls();
+
+    const connectToCandidate = (candidateIndex: number) => {
+      if (cancelled || candidateIndex >= wsUrls.length) {
+        if (!cancelled) {
+          console.log(
+            "[WS] No se encontro un servidor PaintFoot disponible. Modo individual activo.",
+          );
+        }
+        return;
+      }
+
+      const wsUrl = wsUrls[candidateIndex];
+      let confirmedPaintFootServer = false;
+      let movedToNextCandidate = false;
+
+      const tryNextCandidate = () => {
+        if (cancelled || confirmedPaintFootServer || movedToNextCandidate) return;
+        movedToNextCandidate = true;
+        if (attemptTimeout) clearTimeout(attemptTimeout);
+        try {
+          ws?.close();
+        } catch {
+          // Continuar con el siguiente puerto aunque el socket anterior falle.
+        }
+        retryTimeout = setTimeout(
+          () => connectToCandidate(candidateIndex + 1),
+          100,
+        );
+      };
+
+      try {
         ws = new WebSocket(wsUrl);
         wsRef.current = ws;
-
-        ws.onopen = () => {
-          console.log("Conectado al servidor WebSocket local:", wsUrl);
-          ws?.send(JSON.stringify({ type: "player-hello", id: myPlayerId }));
-          if (latestLocationRef.current) {
-            sendPlayerLocation(
-              ws,
-              myPlayerId,
-              latestLocationRef.current,
-              playerProfile.color,
-            );
-          }
-          if (pushTokenRef.current) {
-            sendPushToken(ws, myPlayerId, pushTokenRef.current);
-          }
-          ws?.send(JSON.stringify({
-            type: "territory-sync",
-            id: myPlayerId,
-            territoryIds: territoriesRef.current
-              .filter((territory) => territory.playerId === myPlayerId)
-              .map((territory) => territory.id),
-          }));
-        };
+        attemptTimeout = setTimeout(tryNextCandidate, 2_500);
 
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data.type === "location" && data.id !== myPlayerId) {
+            if (
+              !movedToNextCandidate &&
+              data.type === "server-ready" &&
+              data.service === "paintfoot"
+            ) {
+              confirmedPaintFootServer = true;
+              if (attemptTimeout) clearTimeout(attemptTimeout);
+              console.log("Conectado al servidor WebSocket local:", wsUrl);
+              ws?.send(JSON.stringify({ type: "player-hello", id: myPlayerId }));
+              if (
+                latestLocationRef.current &&
+                multiplayerPreferencesRef.current.shareRealtimeLocation
+              ) {
+                sendPlayerLocation(
+                  ws,
+                  myPlayerId,
+                  latestLocationRef.current,
+                  playerProfile.color,
+                );
+              }
+              if (pushTokenRef.current) {
+                sendPushToken(ws, myPlayerId, pushTokenRef.current);
+              }
+              ws?.send(JSON.stringify({
+                type: "territory-sync",
+                id: myPlayerId,
+                territoryIds: territoriesRef.current
+                  .filter((territory) => territory.playerId === myPlayerId)
+                  .map((territory) => territory.id),
+              }));
+              return;
+            }
+
+            if (
+              confirmedPaintFootServer &&
+              data.type === "location" &&
+              data.id !== myPlayerId
+            ) {
               mapRef.current?.injectJavaScript(
                 `window.setOtherPlayerLocation('${data.id}', ${data.latitude}, ${data.longitude}, '${data.color || "#FF8800"}'); true;`,
               );
             }
-          } catch (e) {
-            console.warn("Error parseando mensaje WS:", e);
+          } catch (error) {
+            if (confirmedPaintFootServer) {
+              console.warn("Error parseando mensaje WS:", error);
+            }
           }
         };
-
-        ws.onerror = () => {
-          // El servidor WebSocket es opcional (modo multijugador local).
-          // Si no está corriendo, la app funciona normalmente en modo individual.
-          console.log(
-            "[WS] Servidor no disponible en el puerto 8082. Modo individual activo.",
-          );
+        ws.onerror = tryNextCandidate;
+        ws.onclose = () => {
+          if (!confirmedPaintFootServer) tryNextCandidate();
         };
-      } else {
-        console.warn(
-          "No se configuro EXPO_PUBLIC_WS_URL y no se pudo determinar la IP local.",
-        );
+      } catch {
+        tryNextCandidate();
       }
-    } catch (e) {
-      console.warn("No se pudo inicializar WebSocket:", e);
+    };
+
+    if (wsUrls.length > 0) {
+      connectToCandidate(0);
+    } else {
+      console.warn(
+        "No se configuro EXPO_PUBLIC_WS_URL y no se pudo determinar la IP local.",
+      );
     }
 
     return () => {
+      cancelled = true;
+      if (attemptTimeout) clearTimeout(attemptTimeout);
+      if (retryTimeout) clearTimeout(retryTimeout);
       if (ws) {
         ws.close();
       }
+      if (wsRef.current === ws) wsRef.current = null;
     };
-  }, [myPlayerId, playerProfile.color]);
+  }, [myPlayerId, playerProfile.color, playerProfile.globalId, territoriesLoaded]);
 
   useEffect(() => {
     territoriesRef.current = territories;
@@ -609,6 +836,11 @@ export default function MapScreen() {
             ? "Permiso de ubicacion denegado. Intenta nuevamente."
             : "El permiso fue bloqueado. Activalo para Expo Go desde la configuracion del telefono.",
         );
+        showFeedback({
+          id: "location-permission",
+          type: "error",
+          message: "Permiso de ubicación requerido",
+        });
         return;
       }
 
@@ -628,12 +860,20 @@ export default function MapScreen() {
       setLocation(coords);
       latestLocationRef.current = coords;
       setHasLocationPermission(true);
-      sendPlayerLocation(
-        wsRef.current,
-        myPlayerId,
-        coords,
-        playerProfile.color,
-      );
+      showFeedback({
+        id: "location-ready",
+        type: "success",
+        message: "Ubicación activada",
+        cooldownMs: 60_000,
+      });
+      if (multiplayerPreferences.shareRealtimeLocation) {
+        sendPlayerLocation(
+          wsRef.current,
+          myPlayerId,
+          coords,
+          playerProfile.color,
+        );
+      }
       mapRef.current?.injectJavaScript(
         `window.setUserLocation(${coords.latitude}, ${coords.longitude}, true); true;`,
       );
@@ -641,6 +881,11 @@ export default function MapScreen() {
       setErrorMsg(
         "No se pudo obtener la ubicacion. Verifica que el GPS este activado.",
       );
+      showFeedback({
+        id: "location-unavailable",
+        type: "error",
+        message: "No se pudo obtener ubicación",
+      });
     } finally {
       setIsLoading(false);
     }
@@ -681,19 +926,27 @@ export default function MapScreen() {
 
             latestLocationRef.current = newCoord;
             setLocation(newCoord);
-            sendPlayerLocation(
-              wsRef.current,
-              myPlayerId,
-              newCoord,
-              playerProfile.color,
-            );
+            if (multiplayerPreferencesRef.current.shareRealtimeLocation) {
+              sendPlayerLocation(
+                wsRef.current,
+                myPlayerId,
+                newCoord,
+                playerProfile.color,
+              );
+            }
             mapRef.current?.injectJavaScript(
               `window.setUserLocation(${newCoord.latitude}, ${newCoord.longitude}, false); true;`,
             );
           },
           (reason) => {
             if (!cancelled) {
-              setErrorMsg(`Error de seguimiento GPS: ${reason}`);
+              console.warn("Seguimiento GPS no disponible:", reason);
+              setErrorMsg("No se pudo continuar la ubicación en tiempo real.");
+              showFeedback({
+                id: "gps-tracking-error",
+                type: "error",
+                message: "No se pudo obtener ubicación",
+              });
             }
           },
         );
@@ -745,22 +998,69 @@ export default function MapScreen() {
             existing,
             myPlayerId,
             createdAt,
-          );
+          ) && existing.status !== "protected";
           if (!conquerable) {
             debugLog("TERRITORY", "Conquista bloqueada: territorio con escudo activo.");
+            showFeedback({
+              id: "territory-protected",
+              type: "warning",
+              message: "Territorio protegido",
+            });
           }
           return conquerable;
         })
-        .map<Territory>((loop, index) =>
-          createTerritoryFromLoop(
+        .map<Territory>((loop, index) => {
+          const existing = territoriesRef.current.find(
+            (territory) => territory.signature === loop.signature,
+          );
+          const territory = createTerritoryFromLoop(
             loop,
             playerProfile,
             createdAt + index,
             index,
-          ),
-        );
+          );
+          const isPendingSteal = Boolean(
+            existing && existing.playerId !== myPlayerId,
+          );
+          return {
+            ...territory,
+            status: !playerProfile.globalId
+              ? "confirmed"
+              : !isOnlineRef.current && !isPendingSteal
+                ? "pending_global_sync"
+                : "pending_capture",
+            targetTerritoryId:
+              existing && existing.playerId !== myPlayerId ? existing.id : null,
+            regionIds: [...new Set(loop.coordinates.map(coordinateRegionId))],
+          };
+        });
 
       if (newTerritories.length === 0) return;
+
+      const hasPendingSteal = newTerritories.some(
+        (territory) => Boolean(territory.targetTerritoryId),
+      );
+      const hasPendingGlobalSync = newTerritories.some(
+        (territory) => territory.status === "pending_global_sync",
+      );
+      showFeedback({
+        id: "territory-capture",
+        type:
+          hasPendingSteal || hasPendingGlobalSync
+            ? "warning"
+            : playerProfile.globalId
+              ? "info"
+              : "success",
+        message: hasPendingSteal
+          ? isOnlineRef.current
+            ? "Intento de captura iniciado"
+            : "Captura pendiente de sincronizar"
+          : hasPendingGlobalSync
+            ? "Territorio guardado · pendiente de sincronizar"
+            : playerProfile.globalId
+              ? "Territorio enviado para validar"
+              : "Territorio conquistado",
+      });
 
       sessionTerritoryCountRef.current += newTerritories.length;
       sessionAreaM2Ref.current += newTerritories.reduce(
@@ -789,23 +1089,75 @@ export default function MapScreen() {
       }
 
       setTerritories((previousTerritories) => {
-        const bySignature = new Map(
-          previousTerritories.map((territory) => [territory.signature, territory]),
-        );
-        newTerritories.forEach((territory) => bySignature.set(territory.signature, territory));
-        const next = [...bySignature.values()];
+        const next = [
+          ...previousTerritories,
+          ...newTerritories.filter(
+            (candidate) =>
+              !previousTerritories.some((territory) => territory.id === candidate.id),
+          ),
+        ];
         setTotalAreaM2(next.reduce((total, territory) => total + territory.areaM2, 0));
         return next;
       });
       void appendStoredTerritories(newTerritories)
-        .then(() => {
+        .then(async () => {
           debugLog("TERRITORY", "Guardado correctamente.");
+          if (!playerProfile.globalId) return;
+          const activeSession = await getRecoverableTrackingSession();
+          const candidatesWithSession = newTerritories.map((candidate) => ({
+            ...candidate,
+            captureSessionId: activeSession?.id ?? null,
+          }));
+          for (const candidate of candidatesWithSession) {
+            await updateStoredTerritory(candidate);
+          }
+          if (!isOnlineRef.current) return;
+          for (const candidate of candidatesWithSession) {
+            const result = await confirmGlobalTerritoryCapture(
+              candidate,
+              activeSession?.id ?? null,
+            );
+            if (result.reason === "protected") {
+              showFeedback({
+                id: "territory-protected",
+                type: "warning",
+                message: "Territorio protegido",
+              });
+              const stored = await discardStoredPendingCapture(candidate.id);
+              territoriesRef.current = stored;
+              setTerritories(stored);
+              continue;
+            }
+            if (result.reason !== "confirmed") {
+              showFeedback({
+                id: "territory-capture",
+                type: "error",
+                message: candidate.targetTerritoryId
+                  ? "No se pudo capturar el territorio"
+                  : "Territorio no válido",
+              });
+              continue;
+            }
+            const stored = await resolveStoredGlobalCapture(
+              candidate.id,
+              result.territory,
+            );
+            territoriesRef.current = stored;
+            setTerritories(stored);
+            showFeedback({
+              id: "territory-capture",
+              type: candidate.targetTerritoryId ? "success" : "success",
+              message: candidate.targetTerritoryId
+                ? "Territorio robado"
+                : "Territorio conquistado",
+            });
+          }
         })
         .catch((error) => {
           console.warn("No se pudieron guardar los territorios:", error);
         });
     },
-    [myPlayerId, playerProfile.color, playerProfile.name],
+    [myPlayerId, playerProfile.color, playerProfile.globalId, playerProfile.name],
   );
 
   const runRoadMatchRef = useRef<(force?: boolean) => Promise<boolean>>(
@@ -854,6 +1206,12 @@ export default function MapScreen() {
           try {
             result = await matchTraceToRoads(matchingWindow);
             await cacheRoadMatchResult(result);
+            showFeedback({
+              id: "road-cache-updated",
+              type: "success",
+              message: "Mapas guardados actualizados",
+              cooldownMs: 300_000,
+            });
             if (result.serverTimeMs) {
               await saveTrustedServerTime(result.serverTimeMs);
             }
@@ -867,6 +1225,14 @@ export default function MapScreen() {
         if (!result) {
           throw networkError ?? new Error("No hay calles guardadas suficientes para validar este recorrido.");
         }
+        setRoadsUsingCache(result.source === "cache");
+        await setActiveTrackingCacheCoverage(
+          result.source === "cache"
+            ? result.cacheCoverageComplete
+              ? "complete"
+              : "partial"
+            : "network",
+        );
         if (generation !== trackingGenerationRef.current) return false;
 
         if (
@@ -915,23 +1281,69 @@ export default function MapScreen() {
         setIntersectionCount(graph.intersectionCount);
         setRoadMatchStatus("ready");
         if (result.source === "cache") {
+          showFeedback({
+            id: "road-cache-active",
+            type: "info",
+            message: "Usando mapas guardados",
+            cooldownMs: 30_000,
+          });
           debugLog("ROAD", "Recorrido validado con calles guardadas en el dispositivo.");
         }
         debugLog(
           "NODE",
           `${graph.nodes.length} nodos; ${graph.intersectionCount} intersecciones recorridas.`,
         );
-        recordDetectedTerritories(nextTrack, analyzeFromSegment);
+        if (result.source !== "cache" || result.cacheCoverageComplete) {
+          recordDetectedTerritories(nextTrack, analyzeFromSegment);
+        } else {
+          setHasPendingSavedRoute(true);
+          showFeedback({
+            id: "road-cache-insufficient",
+            type: "warning",
+            message: "Sin caché vial suficiente",
+            cooldownMs: 30_000,
+          });
+          debugLog(
+            "ROAD",
+            "La cobertura vial guardada es parcial; el cierre esperara validacion.",
+          );
+        }
         if (capturedRawCount < rawTrackRef.current.length) {
           roadMatchQueuedRef.current = true;
         }
         return true;
-      } catch (error) {
+      } catch {
         if (generation !== trackingGenerationRef.current) return false;
-        setRoadMatchStatus("error");
-        console.warn(
-          "[ROAD] No se pudo ajustar el lote a calles; los puntos quedan pendientes:",
-          error,
+        if (!isOnlineRef.current) {
+          await setActiveTrackingCacheCoverage("partial");
+          const provisional = detectProvisionalOfflineCandidate(rawTrack);
+          if (provisional) {
+            const activeSession = await getRecoverableTrackingSession();
+            if (activeSession) {
+              await savePendingTerritory({
+                id: `pending-${activeSession.id}`,
+                sessionId: activeSession.id,
+                rawTrack,
+                sensorEvidence,
+                candidatePolygon: provisional.polygon,
+                createdOffline: true,
+                status: "pending_validation",
+                reason: "Perimetro cerrado pendiente de validacion vial.",
+                createdAt: Date.now(),
+              });
+              setHasPendingSavedRoute(true);
+              showFeedback({
+                id: "territory-validation",
+                type: "warning",
+                message: "Territorio pendiente de validación",
+              });
+            }
+          }
+        }
+        setRoadMatchStatus("pending");
+        debugLog(
+          "ROAD",
+          "Recorrido guardado en el dispositivo; se validara cuando haya conexion.",
         );
         return false;
       } finally {
@@ -947,7 +1359,7 @@ export default function MapScreen() {
         }
       }
     },
-    [recordDetectedTerritories],
+    [recordDetectedTerritories, sensorEvidence],
   );
 
   useEffect(() => {
@@ -960,6 +1372,13 @@ export default function MapScreen() {
     try {
       const pendingRecords = await getPendingTerritories();
       for (const pending of pendingRecords) {
+        const pendingSession = await getTrackingSessionById(pending.sessionId);
+        if (
+          pendingSession &&
+          isActiveOfflineSessionStatus(pendingSession.status)
+        ) {
+          continue;
+        }
         const intact = await verifySessionHashChain(pending.sessionId);
         if (!intact) {
           console.warn(
@@ -988,14 +1407,26 @@ export default function MapScreen() {
             ) {
               return [];
             }
-            return [
-              createTerritoryFromLoop(
-                loop,
-                playerProfile,
-                createdAt + index,
-                index,
-              ),
-            ];
+            const territory = createTerritoryFromLoop(
+              loop,
+              playerProfile,
+              createdAt + index,
+              index,
+            );
+            const isPendingSteal = Boolean(
+              existing && existing.playerId !== myPlayerId,
+            );
+            return [{
+              ...territory,
+              status: !playerProfile.globalId
+                ? "confirmed"
+                : isPendingSteal
+                  ? "pending_capture"
+                  : "pending_global_sync",
+              targetTerritoryId: isPendingSteal ? existing?.id ?? null : null,
+              captureSessionId: pending.sessionId,
+              regionIds: [...new Set(loop.coordinates.map(coordinateRegionId))],
+            }];
           });
           if (newTerritories.length > 0) {
             const stored = await appendStoredTerritories(newTerritories);
@@ -1009,13 +1440,45 @@ export default function MapScreen() {
             pending.id,
             loops.length > 0 ? "confirmed" : "rejected",
           );
-        } catch (error) {
-          console.warn("[Offline] La validacion pendiente se reintentara:", error);
+          if (loops.length === 0) {
+            showFeedback({
+              id: "territory-validation",
+              type: "error",
+              message: "Territorio no válido",
+            });
+          }
+          if (newTerritories.length > 0) {
+            publishOfflineSyncStatus(
+              "syncing",
+              "Territorio enviado para validar",
+            );
+            await synchronizePendingOperations();
+          }
+        } catch {
+          debugLog(
+            "ROAD",
+            "La validacion sigue pendiente y se intentara nuevamente con una conexion estable.",
+          );
           break;
         }
       }
       const remaining = await getPendingTerritories();
-      setHasPendingSavedRoute(remaining.length > 0);
+      const remainingFinalizable = [];
+      for (const pending of remaining) {
+        const session = await getTrackingSessionById(pending.sessionId);
+        if (!session || !isActiveOfflineSessionStatus(session.status)) {
+          remainingFinalizable.push(pending);
+        }
+      }
+      setHasPendingSavedRoute(
+        !isTrackingRef.current && remaining.length > 0,
+      );
+      if (
+        remainingFinalizable.length === 0 &&
+        getOfflineSyncSnapshot().status === "syncing"
+      ) {
+        publishOfflineSyncStatus("synced", "Sincronizado");
+      }
     } finally {
       pendingSyncInFlightRef.current = false;
     }
@@ -1023,10 +1486,23 @@ export default function MapScreen() {
 
   useEffect(() => {
     if (!isOnline) return;
-    void synchronizePendingRoutes();
-    if (rawTrackRef.current.length >= 2) {
-      void runRoadMatchRef.current(true);
-    }
+    let cancelled = false;
+    void (async () => {
+      if (isTrackingRef.current) {
+        await markStoredRouteConnectionState("active_syncing");
+      }
+      await synchronizePendingRoutes();
+      await synchronizePendingOperations();
+      if (rawTrackRef.current.length >= 2) {
+        await runRoadMatchRef.current(true);
+      }
+      if (!cancelled && isTrackingRef.current) {
+        await markStoredRouteConnectionState("active_local");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [isOnline, synchronizePendingRoutes]);
 
   const scheduleRoadMatch = useCallback((force = false) => {
@@ -1051,6 +1527,15 @@ export default function MapScreen() {
     }, delay);
   }, []);
 
+  useEffect(
+    () => registerGameSystemActions({
+      selectTheme,
+      retryRoadMatching: () => scheduleRoadMatch(true),
+      openNotificationSettings: () => void launchNotificationSettings(),
+    }),
+    [launchNotificationSettings, scheduleRoadMatch, selectTheme],
+  );
+
   const processRoutePoint = useCallback(
     (
       point: StoredLocationPoint,
@@ -1074,6 +1559,12 @@ export default function MapScreen() {
         point.accuracy !== null &&
         point.accuracy > MAX_ACCEPTABLE_ACCURACY_METERS
       ) {
+        showFeedback({
+          id: "gps-low-accuracy",
+          type: "warning",
+          message: "GPS con baja precisión · buscando mejor señal",
+          cooldownMs: 30_000,
+        });
         persistPoint(false);
         return false;
       }
@@ -1142,16 +1633,21 @@ export default function MapScreen() {
             })),
       );
       persistPoint(true);
+      if (isOnlineRef.current) {
+        void prefetchRoadRegionsNear(newCoord);
+      }
 
       mapRef.current?.injectJavaScript(
         `window.setUserLocation(${newCoord.latitude}, ${newCoord.longitude}, false); true;`,
       );
-      sendPlayerLocation(
-        wsRef.current,
-        myPlayerId,
-        newCoord,
-        playerProfile.color,
-      );
+      if (multiplayerPreferencesRef.current.shareRealtimeLocation) {
+        sendPlayerLocation(
+          wsRef.current,
+          myPlayerId,
+          newCoord,
+          playerProfile.color,
+        );
+      }
       if (
         rawTrackRef.current.length === 1 ||
         rawTrackRef.current.length % 5 === 0
@@ -1242,7 +1738,7 @@ export default function MapScreen() {
   }, [myPlayerId, scheduleRoadMatch, territoriesLoaded]);
 
   useEffect(() => {
-    if (roadMatchStatus !== "error" || rawTrackRef.current.length < 2) return;
+    if (roadMatchStatus !== "pending" || rawTrackRef.current.length < 2) return;
     const retry = () => void runRoadMatchRef.current(true);
     const timer = setInterval(retry, 15_000);
     const appStateSubscription = AppState.addEventListener("change", (state) => {
@@ -1412,6 +1908,7 @@ export default function MapScreen() {
         }
       }
 
+      isTrackingRef.current = true;
       setIsTracking(true);
 
       void motionSensorTrackerRef.current.start(setSensorEvidence).then((availability) => {
@@ -1446,6 +1943,12 @@ export default function MapScreen() {
       motionSensorTrackerRef.current.stopSession();
       console.warn("Error al iniciar el seguimiento GPS:", error);
       setErrorMsg("Error al iniciar el seguimiento GPS.");
+      showFeedback({
+        id: "tracking-start-error",
+        type: "error",
+        message: "No se pudo iniciar recorrido",
+      });
+      isTrackingRef.current = false;
       setIsTracking(false);
     }
   }, [
@@ -1528,9 +2031,13 @@ export default function MapScreen() {
     } catch (error) {
       console.warn("No se pudo detener el GPS en segundo plano:", error);
     } finally {
+      isTrackingRef.current = false;
       setIsTracking(false);
+      if (isOnlineRef.current) {
+        void synchronizePendingRoutes();
+      }
     }
-  }, [importStoredRoutePoints, sensorEvidence]);
+  }, [importStoredRoutePoints, sensorEvidence, synchronizePendingRoutes]);
 
   useEffect(() => {
     if (mapStatus !== "ready") return;
@@ -1541,10 +2048,26 @@ export default function MapScreen() {
 
   useEffect(() => {
     if (mapStatus !== "ready") return;
-    mapRef.current?.injectJavaScript(
-      `window.setTerritories(${JSON.stringify(territories)}); true;`,
+    const visibleTerritories = territories.filter(
+      (territory) =>
+        territory.status !== "rejected" &&
+        (multiplayerPreferences.showOtherTerritories ||
+          territory.playerId === myPlayerId),
     );
-  }, [mapStatus, territories]);
+    mapRef.current?.injectJavaScript(
+      `window.setTerritories(${JSON.stringify(visibleTerritories)}); true;`,
+    );
+  }, [mapStatus, multiplayerPreferences.showOtherTerritories, myPlayerId, territories]);
+
+  useEffect(() => {
+    if (!location || !playerProfile.globalId) return;
+    void globalMultiplayerRef.current?.update(
+      location,
+      playerProfile,
+      multiplayerPreferences,
+      routeCoords,
+    );
+  }, [location, multiplayerPreferences, playerProfile, routeCoords]);
 
   useEffect(() => {
     if (mapStatus !== "ready") return;
@@ -1564,6 +2087,7 @@ export default function MapScreen() {
           void updateStoredTerritory(updated).catch((error) =>
             console.warn("No se pudo guardar el estado del escudo:", error),
           );
+          void synchronizeGlobalTerritoryShield(updated);
         }
         return next;
       });
@@ -1636,21 +2160,6 @@ export default function MapScreen() {
         </View>
       )}
 
-      {!isOnline && (
-        <View pointerEvents="none" style={styles.offlineBadge}>
-          <Text style={styles.offlineTitle}>Sin conexión</Text>
-          <Text style={styles.offlineText}>
-            Guardando recorrido en el dispositivo
-          </Text>
-        </View>
-      )}
-
-      {isOnline && hasPendingSavedRoute && roadMatchStatus !== "ready" && (
-        <View pointerEvents="none" style={styles.syncBadge}>
-          <Text style={styles.syncText}>Validando recorrido pendiente...</Text>
-        </View>
-      )}
-
       {errorMsg && (
         <View style={styles.errorBanner}>
           <Text style={styles.errorText}>{errorMsg}</Text>
@@ -1685,41 +2194,28 @@ export default function MapScreen() {
         onShieldUpdated={handleShieldUpdated}
       />
 
-      <View pointerEvents="none" style={styles.gpsBadge}>
-        <View
-          style={[
-            styles.gpsDot,
-            {
-              backgroundColor:
-                gpsAccuracy !== null &&
-                gpsAccuracy <= MAX_ACCEPTABLE_ACCURACY_METERS
-                  ? "#4CAF50"
-                  : "#FFB300",
-            },
-          ]}
-        />
-        <Text style={styles.gpsBadgeText}>
-          {gpsAccuracy === null
-            ? "GPS esperando senal"
-            : `GPS ±${Math.round(gpsAccuracy)} m${
-                gpsAccuracy > MAX_ACCEPTABLE_ACCURACY_METERS
-                  ? " - precision baja"
-                  : ""
-              }`}
-        </Text>
-      </View>
-
       {/* Panel de controles */}
       <View
         style={[
           styles.controlPanel,
           {
+            bottom: Math.max(insets.bottom + 8, Platform.OS === "ios" ? 40 : 24),
+            maxHeight: Math.max(210, height * 0.48),
             backgroundColor: lightTheme
               ? "rgba(255, 255, 255, 0.95)"
               : "rgba(26, 26, 46, 0.92)",
           },
         ]}
       >
+        <ScrollView
+          bounces={false}
+          nestedScrollEnabled
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.controlPanelContent,
+            compactLayout && styles.controlPanelContentCompact,
+          ]}
+        >
         {/* Indicador de estado */}
         <View style={styles.statusContainer}>
           <View
@@ -1731,11 +2227,6 @@ export default function MapScreen() {
           <Text style={[styles.statusText, { color: panelTextColor }]}>
             {isTracking ? "Recorrido activo" : "Recorrido detenido"}
           </Text>
-          {rawPointCount > 0 && (
-            <Text style={[styles.coordCount, { color: secondaryTextColor }]}>
-              {rawPointCount} GPS / {routeCoords.length} vial
-            </Text>
-          )}
           {territories.length > 0 && (
             <Text style={styles.territoryCount}>
               {territories.length} territorio
@@ -1744,87 +2235,11 @@ export default function MapScreen() {
           )}
         </View>
 
-        <Text
-          style={[styles.backgroundStatusText, { color: secondaryTextColor }]}
-        >
-          {BACKGROUND_STATUS_LABEL[backgroundTrackingStatus]}
-        </Text>
-
-        <View style={styles.pushStatusRow}>
-          <Text
-            style={[
-              styles.backgroundStatusText,
-              styles.roadStatusText,
-              { color: secondaryTextColor },
-            ]}
-          >
-            {ROAD_STATUS_LABEL[roadMatchStatus]}
-            {roadSegmentCount > 0
-              ? ` · ${roadSegmentCount} segmentos · ${intersectionCount} cruces`
-              : ""}
-          </Text>
-          {roadMatchStatus === "error" && (
-            <TouchableOpacity
-              style={styles.intentButton}
-              onPress={() => scheduleRoadMatch(true)}
-            >
-              <Text style={styles.intentButtonText}>Reintentar</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
         {totalAreaM2 > 0 && (
           <Text style={styles.territoryAreaText}>
             Area total: {Math.round(totalAreaM2).toLocaleString()} m²
           </Text>
         )}
-
-        <View style={styles.pushStatusRow}>
-          <Text
-            style={[styles.backgroundStatusText, { color: secondaryTextColor }]}
-          >
-            {PUSH_STATUS_LABEL[pushStatus]}
-          </Text>
-          {pushStatus === "permission-denied" && (
-            <TouchableOpacity
-              style={styles.intentButton}
-              onPress={launchNotificationSettings}
-            >
-              <Text style={styles.intentButtonText}>Abrir ajustes</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Botón de inicio/detención */}
-        <View style={styles.themeRow}>
-          <Text style={[styles.themeLabel, { color: panelTextColor }]}>Tema</Text>
-          {(["light", "dark", "auto"] as ThemePreference[]).map(
-            (preference) => (
-              <TouchableOpacity
-                key={preference}
-                style={[
-                  styles.themeButton,
-                  themePreference === preference && styles.themeButtonActive,
-                ]}
-                onPress={() => selectTheme(preference)}
-              >
-                <Text
-                  style={[
-                    styles.themeButtonText,
-                    themePreference === preference &&
-                      styles.themeButtonTextActive,
-                  ]}
-                >
-                  {preference === "light"
-                    ? "Claro"
-                    : preference === "dark"
-                      ? "Oscuro"
-                      : "Auto"}
-                </Text>
-              </TouchableOpacity>
-            ),
-          )}
-        </View>
 
         {isTracking && sensorEvidence && (
           <View style={styles.sensorSummary}>
@@ -1839,11 +2254,6 @@ export default function MapScreen() {
                 ? ` · Altura ${sensorEvidence.relativeElevationMeters >= 0 ? "+" : ""}${sensorEvidence.relativeElevationMeters.toFixed(1)} m`
                 : " · Altura no disponible"}
             </Text>
-            {sensorEvidence.magneticConfidence === "low" && (
-              <Text style={styles.magneticWarning}>
-                Interferencia magnetica: se prioriza GPS y continuidad vial.
-              </Text>
-            )}
           </View>
         )}
 
@@ -1880,6 +2290,7 @@ export default function MapScreen() {
                 : "▶  Iniciar recorrido"}
           </Text>
         </TouchableOpacity>
+        </ScrollView>
       </View>
     </View>
   );
@@ -1922,40 +2333,6 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 13,
     fontWeight: "600",
-  },
-  offlineBadge: {
-    position: "absolute",
-    top: 96,
-    alignSelf: "center",
-    backgroundColor: "rgba(26, 26, 46, 0.94)",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    alignItems: "center",
-  },
-  offlineTitle: {
-    color: "#FFCC80",
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  offlineText: {
-    color: "#FFFFFF",
-    fontSize: 11,
-    marginTop: 2,
-  },
-  syncBadge: {
-    position: "absolute",
-    top: 96,
-    alignSelf: "center",
-    backgroundColor: "rgba(26, 26, 46, 0.94)",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-  },
-  syncText: {
-    color: "#80CBC4",
-    fontSize: 12,
-    fontWeight: "700",
   },
   errorBanner: {
     position: "absolute",
@@ -2041,13 +2418,11 @@ const styles = StyleSheet.create({
   },
   controlPanel: {
     position: "absolute",
-    bottom: Platform.select({ ios: 40, android: 24 }),
     left: 16,
     right: 16,
     backgroundColor: "rgba(26, 26, 46, 0.92)",
     borderRadius: 20,
-    padding: 20,
-    gap: 16,
+    overflow: "hidden",
     // Sombra
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 4 },
@@ -2055,8 +2430,11 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 8,
   },
+  controlPanelContent: { gap: 16, padding: 20 },
+  controlPanelContentCompact: { gap: 12, padding: 14 },
   statusContainer: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
     gap: 8,
   },

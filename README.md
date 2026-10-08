@@ -17,11 +17,11 @@ El archivo de configuración local debe llamarse exactamente `.env` y debe estar
 
 Antes de iniciar, editar `.env` y reemplazar como mínimo:
 
-- `EXPO_PUBLIC_WS_URL`: IP local de la computadora y puerto `8082`.
-- `EXPO_PUBLIC_STRIPE_API_URL`: la misma IP local y puerto `4000`.
+- `EXPO_PUBLIC_WS_URL`: IP local de la computadora y puerto inicial `8082`.
+- `EXPO_PUBLIC_STRIPE_API_URL`: la misma IP local y puerto inicial `4000`.
 - `STRIPE_SECRET_KEY`: clave secreta de prueba entregada de forma privada por el responsable de la cuenta Stripe.
 - `STRIPE_PUBLIC_KEY`: clave pública de prueba de la misma cuenta.
-- Los `STRIPE_SHIELD_*_PRICE_ID` si se usan productos permanentes de Stripe.
+- Los `STRIPE_SHIELD_*_PRICE_ID` si se usan productos permanentes de Stripe. Si están vacíos, los escudos usan los importes `STRIPE_SHIELD_*_AMOUNT_CENTS` o `STRIPE_DEFAULT_AMOUNT_CENTS` mediante Checkout.
 - `STRIPE_WEBHOOK_SECRET` cuando se prueben webhooks con Stripe CLI.
 
 Ejemplo de direcciones para una computadora cuya IP es `192.168.1.50`:
@@ -33,19 +33,53 @@ EXPO_PUBLIC_STRIPE_API_URL=http://192.168.1.50:4000/api/stripe
 
 El teléfono y la computadora deben estar conectados a la misma red local. La clave `STRIPE_SECRET_KEY` pertenece únicamente al servidor; nunca debe llevar el prefijo `EXPO_PUBLIC_` ni incluirse directamente en la aplicación móvil.
 
+## Activar respaldo con Supabase
+
+1. Abrir el SQL Editor del proyecto Supabase.
+2. Ejecutar completo [`supabase/paintfoot-sync.sql`](supabase/paintfoot-sync.sql).
+3. Ejecutar despues [`supabase/paintfoot-global-multiplayer.sql`](supabase/paintfoot-global-multiplayer.sql).
+4. Confirmar que Email este habilitado en Authentication > Providers.
+5. Configurar `EXPO_PUBLIC_SUPABASE_URL` y `EXPO_PUBLIC_SUPABASE_ANON_KEY`.
+
+El script es no destructivo, activa RLS y crea la funcion idempotente de
+sincronizacion. El segundo activa el mundo global, los colores estables,
+presencia regional, historial de propietarios, disputas y la captura segura por
+RPC. La aplicacion nunca necesita una clave `service_role`.
+
+## Cuentas propias de PaintFoot
+
+El login y registro de la aplicación usan la API privada de PaintFoot, no
+Supabase Auth. Ejecuta [`supabase/paintfoot-custom-auth.sql`](supabase/paintfoot-custom-auth.sql)
+en el SQL Editor y configura `SUPABASE_SECRET_KEY` solamente en `.env.local` o
+`.env` del servidor. La clave no debe comenzar con `EXPO_PUBLIC_`, porque nunca
+debe llegar a Expo Go ni al APK. Las contraseñas se guardan como hashes
+derivados con `scrypt`; no se almacenan en texto plano y no se verifica el
+correo electrónico antes de entrar.
+
 ## Ejecutar
 
 Aplicación Expo:
 
 ```powershell
-npx expo start
+npm start
 ```
 
-Servidor multijugador/WebSocket, si no se inició automáticamente:
+Este comando inicia Expo con selección automática de puerto. Si `8081` está
+ocupado, Metro utiliza el siguiente puerto libre. WebSocket parte de `8082` y
+Stripe de `4000`; ambos prueban puertos consecutivos y la app móvil encuentra
+automáticamente el servidor correcto. Si se ejecuta Expo directamente, usar
+`npx expo start --port 0` para obtener el mismo comportamiento automático.
+
+Servidor local de compatibilidad y notificaciones, si no se inició automáticamente:
 
 ```powershell
 npm run ws-server
 ```
+
+Este servidor local no crea grupos ni mundos separados. El multijugador
+principal utiliza un único mundo persistente en Supabase y canales geográficos
+`paintfoot-world:<regionId>`; todos los jugadores autenticados consultan los
+mismos territorios globales cercanos.
 
 Servidor de pagos:
 

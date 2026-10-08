@@ -2,6 +2,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import {
   getOfflineTerritories,
+  deleteOfflineTerritories,
+  restoreOfflineTerritories,
   saveOfflineTerritories,
 } from "@/services/offline-storage";
 import { sanitizeTerritoryShield } from "@/services/territory-shields";
@@ -78,12 +80,16 @@ export function appendStoredTerritories(newTerritories: Territory[]) {
 
   return serializeStorageOperation(async () => {
     const stored = await readTerritories();
+    const storageKey = (territory: Territory) =>
+      territory.status === "pending_capture"
+        ? `pending:${territory.id}`
+        : `signature:${territory.signature}`;
     const bySignature = new Map(
-      stored.map((territory) => [territory.signature, territory]),
+      stored.map((territory) => [storageKey(territory), territory]),
     );
     for (const territory of newTerritories) {
       const sanitizedTerritory = sanitizeTerritoryShield(territory);
-      bySignature.set(sanitizedTerritory.signature, sanitizedTerritory);
+      bySignature.set(storageKey(sanitizedTerritory), sanitizedTerritory);
     }
     const nextTerritories = [...bySignature.values()].sort(
       (first, second) => first.createdAt - second.createdAt,
@@ -97,6 +103,46 @@ export function appendStoredTerritories(newTerritories: Territory[]) {
 
 export function updateStoredTerritory(updatedTerritory: Territory) {
   return appendStoredTerritories([updatedTerritory]);
+}
+
+export function restoreStoredTerritoriesFromBackup(territories: Territory[]) {
+  return serializeStorageOperation(async () => {
+    await restoreOfflineTerritories(territories.map(sanitizeTerritoryShield));
+    const restored = await readTerritories();
+    for (const listener of territoryListeners) listener(restored);
+    return restored;
+  });
+}
+
+export function resolveStoredGlobalCapture(
+  pendingId: string,
+  canonicalTerritory: Territory,
+) {
+  return serializeStorageOperation(async () => {
+    const stored = await readTerritories();
+    const replacedIds = stored
+      .filter(
+        (territory) =>
+          territory.id === pendingId ||
+          (territory.signature === canonicalTerritory.signature &&
+            territory.id !== canonicalTerritory.id),
+      )
+      .map((territory) => territory.id);
+    await deleteOfflineTerritories(replacedIds);
+    await restoreOfflineTerritories([sanitizeTerritoryShield(canonicalTerritory)]);
+    const next = await readTerritories();
+    for (const listener of territoryListeners) listener(next);
+    return next;
+  });
+}
+
+export function discardStoredPendingCapture(pendingId: string) {
+  return serializeStorageOperation(async () => {
+    await deleteOfflineTerritories([pendingId]);
+    const next = await readTerritories();
+    for (const listener of territoryListeners) listener(next);
+    return next;
+  });
 }
 
 export function subscribeToStoredTerritories(

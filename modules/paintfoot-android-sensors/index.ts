@@ -42,10 +42,17 @@ interface NativeAndroidSensorsModule {
   getCapabilitiesAsync(): Promise<AndroidSensorCapability[]>;
   startAsync(ids: AndroidSensorId[], updateIntervalMs: number): Promise<AndroidSensorId[]>;
   stopAsync(): Promise<void>;
+  getRuntimeStorageInfoAsync(): Promise<AndroidRuntimeStorageInfo>;
   addListener(
     eventName: "onSensorChanged",
     listener: (event: AndroidSensorEvent) => void,
   ): EventSubscription;
+}
+
+export interface AndroidRuntimeStorageInfo {
+  elapsedRealtimeMs: number;
+  bootId: string;
+  externalFilesUri: string | null;
 }
 
 const nativeModule =
@@ -80,4 +87,9 @@ export async function startAndroidSensors(
 
 export async function stopAndroidSensors() {
   if (nativeModule) await nativeModule.stopAsync();
+}
+
+export async function getAndroidRuntimeStorageInfo() {
+  if (!nativeModule) return null;
+  return nativeModule.getRuntimeStorageInfoAsync();
 }

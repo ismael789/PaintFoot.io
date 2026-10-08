@@ -8,19 +8,28 @@ const Stripe = require("stripe");
 const { shieldServerStore, MAX_SHIELD_DURATION_HOURS } = require("./shield-server-store");
 
 const DEFAULT_PORT = 4000;
+const MAX_PORT_ATTEMPTS = 20;
 const MAX_BODY_BYTES = 128 * 1024;
 const SHIELD_PRODUCTS = [1, 6, 12, 24, 36].map((durationHours) => ({
   id: `shield_${durationHours}h`,
   durationHours,
   environmentVariable: `STRIPE_SHIELD_${durationHours}H_PRICE_ID`,
+  amountEnvironmentVariable: `STRIPE_SHIELD_${durationHours}H_AMOUNT_CENTS`,
 }));
 
 function shieldProductsConfiguration() {
   return SHIELD_PRODUCTS.map((product) => {
     const priceId = String(process.env[product.environmentVariable] || "").trim();
+    const configuredAmount = Number(
+      process.env[product.amountEnvironmentVariable] || process.env.STRIPE_DEFAULT_AMOUNT_CENTS || 0,
+    );
     return {
       ...product,
       priceId: /^price_[A-Za-z0-9]+$/.test(priceId) ? priceId : null,
+      inlineUnitAmount:
+        Number.isInteger(configuredAmount) && configuredAmount > 0
+          ? configuredAmount
+          : null,
     };
   });
 }
@@ -159,7 +168,9 @@ function corsHeaders(request) {
     "Access-Control-Allow-Headers": "Content-Type, Stripe-Signature",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Expose-Headers": "X-PaintFoot-Server",
     "Cache-Control": "no-store",
+    "X-PaintFoot-Server": "stripe-api",
   };
 }
 
@@ -329,7 +340,16 @@ async function handleShieldProducts(request, response) {
   const products = await Promise.all(
     shieldProductsConfiguration().map(async (product) => {
       if (!product.priceId) {
-        return { id: product.id, duration_hours: product.durationHours, configured: false };
+        const configured = product.inlineUnitAmount != null;
+        return {
+          id: product.id,
+          duration_hours: product.durationHours,
+          configured,
+          price_id: null,
+          currency: configured ? configuration.currency : null,
+          unit_amount: configured ? product.inlineUnitAmount : null,
+          name: configured ? `Escudo ${product.durationHours} horas` : null,
+        };
       }
       try {
         const price = await stripe.prices.retrieve(product.priceId, { expand: ["product"] });
@@ -380,6 +400,18 @@ function validatedIdentity(body) {
   return { territoryId, playerId };
 }
 
+function validatedOptionalTerritoryIdentity(body) {
+  const territoryId = typeof body.territory_id === "string" ? body.territory_id.trim() : "";
+  const playerId = typeof body.player_id === "string" ? body.player_id.trim() : "";
+  if ((territoryId && !/^[A-Za-z0-9_.:-]{1,160}$/.test(territoryId)) ||
+      !/^[A-Za-z0-9_.:-]{1,160}$/.test(playerId)) {
+    const error = new Error("territory_id o player_id no valido");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { territoryId, playerId };
+}
+
 function handleShieldStatus(request, response, url) {
   const identity = validatedIdentity({
     territory_id: url.searchParams.get("territory_id"),
@@ -406,10 +438,11 @@ async function handleFreeShield(request, response) {
 
 async function handleShieldCheckout(request, response) {
   const body = await readJsonBody(request);
-  const identity = validatedIdentity(body);
+  const identity = validatedOptionalTerritoryIdentity(body);
   const product = findShieldProduct(typeof body.product_id === "string" ? body.product_id : "");
   const purchaseReference = typeof body.purchase_reference === "string" ? body.purchase_reference.trim() : "";
-  if (!product || !product.priceId || product.durationHours > MAX_SHIELD_DURATION_HOURS) {
+  if (!product || (!product.priceId && product.inlineUnitAmount == null) ||
+      product.durationHours > MAX_SHIELD_DURATION_HOURS) {
     sendJson(response, request, 409, { error: "Producto de escudo no configurado" });
     return;
   }
@@ -417,34 +450,57 @@ async function handleShieldCheckout(request, response) {
     sendJson(response, request, 400, { error: "purchase_reference no valido" });
     return;
   }
-  shieldServerStore.assertOwnership(identity.territoryId, identity.playerId);
+  if (identity.territoryId) {
+    shieldServerStore.assertOwnership(identity.territoryId, identity.playerId);
+  } else {
+    shieldServerStore.getPlayerStatus(identity.playerId);
+  }
 
   const stripe = getStripeClient();
   const configuration = stripeConfiguration();
-  const price = await stripe.prices.retrieve(product.priceId);
-  if (!price.active || price.type !== "one_time" || price.currency !== configuration.currency) {
-    sendJson(response, request, 409, { error: "El precio del escudo no esta activo o no es valido" });
-    return;
+  if (product.priceId) {
+    const price = await stripe.prices.retrieve(product.priceId);
+    if (!price.active || price.type !== "one_time" || price.currency !== configuration.currency) {
+      sendJson(response, request, 409, { error: "El precio del escudo no esta activo o no es valido" });
+      return;
+    }
   }
   const { successUrl, cancelUrl } = checkoutReturnUrls(request, configuration);
   const metadata = {
     purchase_type: "territory_shield",
     product_id: product.id,
     duration_hours: String(product.durationHours),
-    territory_id: identity.territoryId,
     player_id: identity.playerId,
+    ...(identity.territoryId ? { territory_id: identity.territoryId } : {}),
   };
   const session = await stripe.checkout.sessions.create(
     {
       mode: "payment",
-      line_items: [{ price: product.priceId, quantity: 1 }],
+      line_items: [{
+        ...(product.priceId
+          ? { price: product.priceId }
+          : {
+              price_data: {
+                currency: configuration.currency,
+                unit_amount: product.inlineUnitAmount,
+                product_data: { name: `Escudo ${product.durationHours} horas` },
+              },
+            }),
+        quantity: 1,
+      }],
       client_reference_id: purchaseReference,
       metadata,
       payment_intent_data: { metadata },
       success_url: successUrl,
       cancel_url: cancelUrl,
     },
-    { idempotencyKey: buildCheckoutIdempotencyKey(purchaseReference, product.priceId, 1) },
+    {
+      idempotencyKey: buildCheckoutIdempotencyKey(
+        purchaseReference,
+        product.priceId || `${product.id}_${configuration.currency}_${product.inlineUnitAmount}`,
+        1,
+      ),
+    },
   );
   sendJson(response, request, 201, checkoutResponse(session));
 }
@@ -460,25 +516,45 @@ function activateShieldFromCheckoutSession(session) {
   const product = findShieldProduct(metadata.product_id);
   const linePrice = session.line_items?.data?.[0]?.price;
   const linePriceId = typeof linePrice === "string" ? linePrice : linePrice?.id;
-  if (!product || !product.priceId ||
-      String(product.durationHours) !== metadata.duration_hours ||
-      linePriceId !== product.priceId) {
+  const validPrice = product?.priceId
+    ? linePriceId === product.priceId
+    : Boolean(
+        product?.inlineUnitAmount != null &&
+        typeof linePrice !== "string" &&
+        linePrice?.currency === normalizeCurrency(process.env.STRIPE_CURRENCY || "mxn") &&
+        linePrice?.unit_amount === product.inlineUnitAmount,
+      );
+  if (!product || String(product.durationHours) !== metadata.duration_hours || !validPrice) {
     const error = new Error("Los datos del producto pagado no son validos");
     error.statusCode = 409;
     throw error;
   }
-  return shieldServerStore.activate({
-    territoryId: metadata.territory_id,
-    playerId: metadata.player_id,
-    durationHours: product.durationHours,
-    source: "stripe",
-    paymentId: session.id,
-  });
+  if (metadata.territory_id) {
+    return {
+      shield: shieldServerStore.activate({
+        territoryId: metadata.territory_id,
+        playerId: metadata.player_id,
+        durationHours: product.durationHours,
+        source: "stripe",
+        paymentId: session.id,
+      }),
+      purchasedShield: null,
+    };
+  }
+  return {
+    shield: null,
+    purchasedShield: shieldServerStore.storePurchasedShield({
+      playerId: metadata.player_id,
+      durationHours: product.durationHours,
+      productId: product.id,
+      paymentId: session.id,
+    }),
+  };
 }
 
 async function handleShieldConfirmation(request, response) {
   const body = await readJsonBody(request);
-  const identity = validatedIdentity(body);
+  const identity = validatedOptionalTerritoryIdentity(body);
   const sessionId = typeof body.session_id === "string" ? body.session_id.trim() : "";
   if (!/^cs_(test|live)_[A-Za-z0-9]+$/.test(sessionId)) {
     sendJson(response, request, 400, { error: "session_id no valido" });
@@ -487,13 +563,35 @@ async function handleShieldConfirmation(request, response) {
   const session = await getStripeClient().checkout.sessions.retrieve(sessionId, {
     expand: ["line_items.data.price"],
   });
-  if (session.metadata?.territory_id !== identity.territoryId ||
+  if ((session.metadata?.territory_id || "") !== identity.territoryId ||
       session.metadata?.player_id !== identity.playerId) {
-    sendJson(response, request, 403, { error: "La sesion no pertenece a este territorio y jugador" });
+    sendJson(response, request, 403, { error: "La sesion no pertenece a este jugador o territorio" });
     return;
   }
-  const shield = activateShieldFromCheckoutSession(session);
-  sendJson(response, request, 200, { shield, payment_id: session.id });
+  const result = activateShieldFromCheckoutSession(session);
+  sendJson(response, request, 200, {
+    shield: result.shield,
+    purchased_shield: result.purchasedShield,
+    payment_id: session.id,
+  });
+}
+
+async function handlePurchasedShieldActivation(request, response) {
+  const body = await readJsonBody(request);
+  const identity = validatedIdentity(body);
+  const purchasedShieldId = typeof body.purchased_shield_id === "string"
+    ? body.purchased_shield_id.trim()
+    : "";
+  if (!/^cs_(test|live)_[A-Za-z0-9]+$/.test(purchasedShieldId)) {
+    sendJson(response, request, 400, { error: "purchased_shield_id no valido" });
+    return;
+  }
+  const shield = shieldServerStore.activatePurchasedShield({
+    territoryId: identity.territoryId,
+    playerId: identity.playerId,
+    purchasedShieldId,
+  });
+  sendJson(response, request, 200, { shield, purchased_shield_id: purchasedShieldId });
 }
 
 async function handleCheckout(request, response) {
@@ -678,6 +776,10 @@ async function handleStripeRequest(request, response) {
       await handleShieldConfirmation(request, response);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/stripe/shield/activate-purchased") {
+      await handlePurchasedShieldActivation(request, response);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/stripe/checkout") {
       await handleCheckout(request, response);
       return;
@@ -714,12 +816,36 @@ function startStripeApi(port = Number(process.env.STRIPE_PORT || DEFAULT_PORT)) 
   const server = http.createServer((request, response) => {
     void handleStripeRequest(request, response);
   });
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`Stripe API disponible en http://localhost:${port}/api/stripe`);
+  let selectedPort =
+    Number.isInteger(port) && port >= 1 && port <= 65_535 ? port : DEFAULT_PORT;
+  let attempt = 0;
+
+  server.on("listening", () => {
+    const address = server.address();
+    const listeningPort =
+      address && typeof address === "object" ? address.port : selectedPort;
+    console.log(
+      `Stripe API disponible en http://localhost:${listeningPort}/api/stripe`,
+    );
   });
   server.on("error", (error) => {
+    if (
+      error.code === "EADDRINUSE" &&
+      attempt + 1 < MAX_PORT_ATTEMPTS &&
+      selectedPort < 65_535
+    ) {
+      const occupiedPort = selectedPort;
+      selectedPort += 1;
+      attempt += 1;
+      console.warn(
+        `[Stripe API] Puerto ${occupiedPort} ocupado; intentando ${selectedPort}.`,
+      );
+      server.listen(selectedPort, "0.0.0.0");
+      return;
+    }
     console.error("[Stripe API] No se pudo iniciar:", error.message);
   });
+  server.listen(selectedPort, "0.0.0.0");
   return server;
 }
 

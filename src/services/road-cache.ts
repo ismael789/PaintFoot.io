@@ -1,5 +1,6 @@
 import { ROAD_MATCHING_RULES } from "@/config/territory";
 import {
+  getRoadCacheCoverage,
   getRoadSegmentsNearTrack,
   saveRoadSegmentsToCache,
 } from "@/services/offline-storage";
@@ -79,5 +80,6 @@ export async function matchTraceFromRoadCache(
     matchedPointCount: snappedTrack.length,
     unmatchedPointCount: 0,
     source: "cache",
+    cacheCoverageComplete: (await getRoadCacheCoverage(rawTrack)).sufficient,
   };
 }

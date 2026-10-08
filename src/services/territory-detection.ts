@@ -464,9 +464,11 @@ export function createTerritoryFromLoop(
   createdAt = Date.now(),
   suffix = 0,
 ): Territory {
+  const ownerId = player.globalId ?? player.id;
   return {
-    id: `territory-${player.id}-${createdAt}-${suffix}`,
-    playerId: player.id,
+    id: `territory-${ownerId}-${createdAt}-${suffix}`,
+    playerId: ownerId,
+    globalOwnerId: player.globalId,
     playerColor: player.color,
     polygon: toGeoJsonPolygon(loop.coordinates),
     areaM2: loop.areaM2,
@@ -475,6 +477,7 @@ export function createTerritoryFromLoop(
     coordinates: loop.coordinates,
     color: player.color,
     owner: player.name,
+    status: "confirmed",
   };
 }
 

@@ -67,4 +67,48 @@ test("el estado global del escudo existe aunque el jugador tenga 0 territorios",
   assert.equal(status.free_available, true);
   assert.equal(status.free_available_at, 0);
   assert.equal(status.free_last_claimed_at, null);
+  assert.deepEqual(status.purchased_shields, []);
+});
+
+test("un jugador sin territorios puede guardar un escudo comprado", (t) => {
+  const store = temporaryStore(t);
+  const purchased = store.storePurchasedShield({
+    playerId: "player-without-territories",
+    durationHours: 12,
+    productId: "shield_12h",
+    paymentId: "cs_test_inventory1",
+    now: 10_000,
+  });
+  assert.equal(purchased.durationHours, 12);
+  assert.equal(store.getPlayerStatus("player-without-territories").purchased_shields.length, 1);
+
+  const restored = new ShieldServerStore(store.filePath);
+  assert.equal(restored.getPlayerStatus("player-without-territories").purchased_shields[0].id, "cs_test_inventory1");
+});
+
+test("un escudo comprado se activa al conquistar un territorio y no se duplica", (t) => {
+  const store = temporaryStore(t);
+  store.storePurchasedShield({
+    playerId: "player-1",
+    durationHours: 6,
+    productId: "shield_6h",
+    paymentId: "cs_test_inventory2",
+    now: 1_000,
+  });
+  store.registerTerritory("territory-1", "player-1");
+  const shield = store.activatePurchasedShield({
+    territoryId: "territory-1",
+    playerId: "player-1",
+    purchasedShieldId: "cs_test_inventory2",
+    now: 2_000,
+  });
+  assert.equal(shield.expiresAt, 2_000 + 6 * 60 * 60 * 1_000);
+  assert.deepEqual(store.getPlayerStatus("player-1").purchased_shields, []);
+  const repeated = store.activatePurchasedShield({
+    territoryId: "territory-1",
+    playerId: "player-1",
+    purchasedShieldId: "cs_test_inventory2",
+    now: 5_000,
+  });
+  assert.deepEqual(repeated, shield);
 });

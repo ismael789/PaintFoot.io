@@ -22,12 +22,20 @@
     "src/services/territory-detection.ts",
     "src/services/territory-shields.ts",
     "src/services/offline-validation.ts",
+    "src/services/network-endpoints.ts",
+    "src/services/global-multiplayer-logic.ts",
+    "src/services/offline-simulation-logic.ts",
+    "src/services/global-feedback.ts",
     "tests/territory-detection.test.ts",
     "tests/sensor-metrics.test.ts",
     "tests/sensor-capability-logic.test.ts",
     "tests/sensor-fusion.test.ts",
     "tests/road-matching.test.ts",
     "tests/territory-shields.test.ts",
-    "tests/offline-validation.test.ts"
+    "tests/offline-validation.test.ts",
+    "tests/network-endpoints.test.ts"
+    ,"tests/global-multiplayer.test.ts",
+    "tests/offline-simulation.test.ts",
+    "tests/global-feedback.test.ts"
   ]
 }
