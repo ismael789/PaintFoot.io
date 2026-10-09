@@ -31,6 +31,7 @@ import {
   getStoredTerritories,
 } from "@/services/territory-storage";
 import { isTerritoryShieldActive } from "@/services/territory-shields";
+import { getCoinBalance, subscribeToCoinBalance } from "@/services/coins";
 import {
   getLatestTrackingSession,
   getThemePreference,
@@ -116,6 +117,7 @@ export default function ProfileScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
+  const [coinBalance, setCoinBalance] = useState(0);
   const [multiplayerPreferences, setMultiplayerPreferences] =
     useState<MultiplayerPreferences>(DEFAULT_MULTIPLAYER_PREFERENCES);
   const [themePreference, setThemePreference] =
@@ -156,7 +158,13 @@ export default function ProfileScreen() {
 
   useEffect(() => {
     void getPersistedAuthSession().then(setAuthSession);
-    return subscribeToAuthSession((session) => setAuthSession(session));
+    void getCoinBalance().then(setCoinBalance);
+    const unsubscribeAuth = subscribeToAuthSession((session) => setAuthSession(session));
+    const unsubscribeCoins = subscribeToCoinBalance(setCoinBalance);
+    return () => {
+      unsubscribeAuth();
+      unsubscribeCoins();
+    };
   }, []);
 
   const loadProfile = useCallback(async () => {
@@ -226,7 +234,11 @@ export default function ProfileScreen() {
     setSaving(true);
     setMessage(null);
     try {
-      const localUpdated = await updatePlayerProfile({ name, color });
+      const registeredName = authSession?.user.name ?? name;
+      const localUpdated = await updatePlayerProfile({
+        name: registeredName,
+        color,
+      });
       const updated = authSession
         ? await synchronizeGlobalPlayerProfile(localUpdated)
         : localUpdated;
@@ -408,18 +420,21 @@ export default function ProfileScreen() {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Datos del jugador</Text>
-        <Text style={styles.label}>Nombre visible</Text>
+        <Text style={styles.label}>Nombre registrado del jugador</Text>
         <TextInput
-          value={name}
-          onChangeText={setName}
+          value={authSession?.user.name ?? name}
           maxLength={30}
           autoCapitalize="words"
           autoCorrect={false}
-          placeholder="Nombre del jugador"
+          editable={false}
+          placeholder="Nombre registrado"
           placeholderTextColor="#6F7897"
           selectionColor="#40C4FF"
           style={styles.input}
         />
+        <Text style={styles.identifierHelp}>
+          Este nombre se tomó del registro y se usa para identificarte en el mapa.
+        </Text>
 
         <Text style={styles.label}>Color global en el mapa</Text>
         {profile.globalId ? (
@@ -473,6 +488,13 @@ export default function ProfileScreen() {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Cuenta PaintFoot.io</Text>
+        <View style={styles.coinBalanceCard}>
+          <Text style={styles.coinBalanceIcon}>🪙</Text>
+          <View>
+            <Text style={styles.coinBalanceTitle}>Monedas disponibles</Text>
+            <Text style={styles.coinBalanceValue}>{coinBalance}</Text>
+          </View>
+        </View>
         {authSession?.user ? (
           <>
             <Text style={styles.label}>Nombre</Text>
@@ -882,6 +904,11 @@ const styles = StyleSheet.create({
   localNotice: { color: "#707A99", fontSize: 11, lineHeight: 17, textAlign: "center", paddingHorizontal: 18 },
   accountEmail: { color: "#72E6BE", fontSize: 15, fontWeight: "800" },
   accountValue: { color: "#F1F5FF", fontSize: 16, fontWeight: "800", marginBottom: 8 },
+  coinBalance: { color: "#FFD54A", fontSize: 15, fontWeight: "900", marginLeft: "auto" },
+  coinBalanceCard: { alignItems: "center", backgroundColor: "#1A2940", borderRadius: 16, flexDirection: "row", gap: 12, marginBottom: 16, padding: 14 },
+  coinBalanceIcon: { fontSize: 28 },
+  coinBalanceTitle: { color: "#AAB9D3", fontSize: 12, fontWeight: "700" },
+  coinBalanceValue: { color: "#FFD54A", fontSize: 24, fontWeight: "900", marginTop: 2 },
   accountActions: { gap: 9, marginTop: 4 },
   accountButton: { minHeight: 48, backgroundColor: "#3949AB", borderRadius: 13, alignItems: "center", justifyContent: "center" },
   accountButtonSecondary: { minHeight: 46, backgroundColor: "#33405F", borderRadius: 13, alignItems: "center", justifyContent: "center" },

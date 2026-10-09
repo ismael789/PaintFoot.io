@@ -53,6 +53,7 @@ import {
 import {
   coordinateRegionId,
   getPendingTerritories,
+  getRoadSegmentsNearTrack,
   getRecoverableTrackingSession,
   getTrackingSessionById,
   isActiveOfflineSessionStatus,
@@ -85,9 +86,16 @@ import {
 } from "@/services/tracking-stats";
 import {
   DEFAULT_PLAYER_PROFILE,
+  applyAccountPlayerIdentity,
   getActivePlayerId,
   getOrCreatePlayerProfile,
 } from "@/services/player-profile";
+import {
+  collectCoin,
+  getCoinBalance,
+  type MapCoin,
+} from "@/services/coins";
+import { getPersistedAuthSession } from "@/services/auth";
 import {
   createTerritoryFromLoop,
   detectClosedLoops,
@@ -106,6 +114,7 @@ import {
   ROAD_MATCHING_RULES,
   TRACKING_RULES,
 } from "@/config/territory";
+import { closestPointOnSegment } from "@/utils/geo";
 import type {
   GeoCoordinate,
   PlayerProfile,
@@ -117,6 +126,73 @@ import type {
   ThemePreference,
   TrackingSessionSummary,
 } from "@/types/game";
+
+function contrastingMapColor(color: string) {
+  const match = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!match) return "#F25F5C";
+  const value = Number.parseInt(match[1], 16);
+  const red = 255 - ((value >> 16) & 0xff);
+  const green = 255 - ((value >> 8) & 0xff);
+  const blue = 255 - (value & 0xff);
+  return `#${[red, green, blue]
+    .map((channel) => channel.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function centerCoinOnNearestRoad(
+  coordinate: Coordinate,
+  segments: RoadSegment[],
+): Coordinate {
+  let nearest: { coordinate: Coordinate; distanceMeters: number } | null = null;
+  for (const segment of segments) {
+    for (let index = 1; index < segment.coordinates.length; index += 1) {
+      const projected = closestPointOnSegment(
+        coordinate,
+        segment.coordinates[index - 1],
+        segment.coordinates[index],
+      );
+      if (!nearest || projected.distanceMeters < nearest.distanceMeters) {
+        nearest = {
+          coordinate: {
+            latitude: projected.coordinate.latitude,
+            longitude: projected.coordinate.longitude,
+          },
+          distanceMeters: projected.distanceMeters,
+        };
+      }
+
+    }
+  }
+  return nearest && nearest.distanceMeters <= 80
+    ? { ...coordinate, ...nearest.coordinate }
+    : coordinate;
+}
+
+function createStreetCoins(
+  location: Coordinate,
+  segments: RoadSegment[],
+): MapCoin[] {
+  const candidates = segments
+    .flatMap((segment) => segment.coordinates)
+    .filter((point) => distanceInMeters(point, location) <= 500)
+    .filter(
+      (point, index, points) =>
+        points.findIndex((other) => distanceInMeters(other, point) < 8) ===
+        index,
+    )
+    .sort(
+      (first, second) =>
+        distanceInMeters(first, location) - distanceInMeters(second, location),
+    )
+    .slice(0, 80);
+  return candidates.map((point, index) => ({
+    id: `street-${Date.now()}-${index}`,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    value: 1,
+    availableAt: Date.now() + 15_000,
+  }));
+}
 import { debugLog } from "@/utils/debug-log";
 import { distanceInMeters } from "@/utils/geo";
 import { MAP_HTML } from "@/services/map-html";
@@ -323,6 +399,8 @@ export default function MapScreen() {
     useState<TrackingSessionSummary | null>(null);
   const [multiplayerPreferences, setMultiplayerPreferences] =
     useState<MultiplayerPreferences>(DEFAULT_MULTIPLAYER_PREFERENCES);
+  const [coinBalance, setCoinBalance] = useState(0);
+  const [activeCoins, setActiveCoins] = useState<MapCoin[]>([]);
   const [worldStatus, setWorldStatus] =
     useState<GlobalWorldStatus>("local");
   const myPlayerId = getActivePlayerId(playerProfile);
@@ -360,10 +438,100 @@ export default function MapScreen() {
   const globalMultiplayerRef = useRef<GlobalMultiplayerController | null>(null);
   const globalTerritoriesLoadedRef = useRef(false);
   const nearbyPlayerCountRef = useRef(0);
+  const activeCoinsRef = useRef<MapCoin[]>([]);
+  const lastCoinCoordinateRef = useRef<Coordinate | null>(null);
+  const coinRespawnTimersRef = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
+  const initialCoinsSeededRef = useRef(false);
+  const mapPerspectiveRef = useRef({
+    playerId: myPlayerId,
+    playerColor: playerProfile.color,
+  });
+
+  const scheduleCoinRespawn = useCallback((coin: MapCoin) => {
+    const existingTimer = coinRespawnTimersRef.current.get(coin.id);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timer = setTimeout(() => {
+      coinRespawnTimersRef.current.delete(coin.id);
+      const respawnedCoin: MapCoin = {
+        ...coin,
+        id: `${coin.id}-respawn-${Date.now()}`,
+        availableAt: Date.now(),
+      };
+      activeCoinsRef.current = [...activeCoinsRef.current, respawnedCoin];
+      setActiveCoins(activeCoinsRef.current);
+    }, 10 * 60 * 1000);
+    coinRespawnTimersRef.current.set(coin.id, timer);
+  }, []);
+
+  useEffect(
+    () => () => {
+      coinRespawnTimersRef.current.forEach((timer) => clearTimeout(timer));
+      coinRespawnTimersRef.current.clear();
+    },
+    [],
+  );
 
   useEffect(() => {
     isTrackingRef.current = isTracking;
   }, [isTracking]);
+
+  useEffect(() => {
+    mapPerspectiveRef.current = {
+      playerId: myPlayerId,
+      playerColor: playerProfile.color,
+    };
+  }, [myPlayerId, playerProfile.color]);
+
+  useEffect(() => {
+    if (mapStatus !== "ready") return;
+    mapRef.current?.injectJavaScript(
+      `window.setCoins?.(${JSON.stringify(activeCoins)}); true;`,
+    );
+  }, [activeCoins, mapStatus]);
+
+  useEffect(() => {
+    if (!location || initialCoinsSeededRef.current) return;
+    initialCoinsSeededRef.current = true;
+    let cancelled = false;
+    const loadStreetCoins = async () => {
+      await prefetchRoadRegionsNear(location);
+      const cachedSegments = await getRoadSegmentsNearTrack([location], 0.005);
+      if (cancelled) return;
+      roadSegmentsRef.current = cachedSegments;
+      const streetCoins = createStreetCoins(location, cachedSegments);
+      if (streetCoins.length === 0) {
+        const fallback = centerCoinOnNearestRoad(location, cachedSegments);
+        streetCoins.push({
+          id: `street-fallback-${Date.now()}`,
+          ...fallback,
+          value: 1,
+          availableAt: Date.now() + 15_000,
+        });
+      }
+      activeCoinsRef.current = streetCoins;
+      setActiveCoins(streetCoins);
+    };
+    void loadStreetCoins();
+    return () => {
+      cancelled = true;
+    };
+  }, [location]);
+
+  useEffect(() => {
+    if (roadMatchStatus !== "ready" || roadSegmentsRef.current.length === 0) return;
+    const centeredCoins = activeCoinsRef.current.map((coin) => {
+      const coordinate = centerCoinOnNearestRoad(coin, roadSegmentsRef.current);
+      return {
+        ...coin,
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+      };
+    });
+    activeCoinsRef.current = centeredCoins;
+    setActiveCoins(centeredCoins);
+  }, [roadMatchStatus]);
 
   useEffect(() => {
     multiplayerPreferencesRef.current = multiplayerPreferences;
@@ -464,6 +632,10 @@ export default function MapScreen() {
         }
         const visiblePlayers = players.map((player) => ({
           ...player,
+          color:
+            player.id === mapPerspectiveRef.current.playerId
+              ? mapPerspectiveRef.current.playerColor
+              : contrastingMapColor(mapPerspectiveRef.current.playerColor),
           name: multiplayerPreferencesRef.current.showPlayerNames
             ? player.name
             : "",
@@ -584,14 +756,24 @@ export default function MapScreen() {
   useFocusEffect(useCallback(() => {
     let cancelled = false;
     void Promise.all([
-      getOrCreatePlayerProfile().then(synchronizeGlobalPlayerProfile),
+      getPersistedAuthSession().then(async (session) => {
+        const profile = await getOrCreatePlayerProfile();
+        return session?.user.name
+          ? applyAccountPlayerIdentity({
+              id: session.user.id,
+              name: session.user.name,
+            })
+          : profile;
+      }).then(synchronizeGlobalPlayerProfile),
       getMultiplayerPreferences(),
       getThemePreference(),
-    ]).then(([profile, preferences, preference]) => {
+      getCoinBalance(),
+    ]).then(([profile, preferences, preference, balance]) => {
         if (!cancelled) {
           setPlayerProfile(profile);
           setMultiplayerPreferences(preferences);
           setThemePreference(preference);
+          setCoinBalance(balance);
           if (preference !== "auto") setResolvedTheme(preference);
         }
       });
@@ -1632,6 +1814,54 @@ export default function MapScreen() {
               timestamp,
             })),
       );
+      if (isTrackingRef.current) {
+        const nearbyCoins = activeCoinsRef.current.filter(
+          (coin) =>
+            (!coin.availableAt || Date.now() >= coin.availableAt) &&
+            distanceInMeters(coin, newCoord) <= 15,
+        );
+        if (nearbyCoins.length > 0) {
+          void Promise.all(nearbyCoins.map((coin) => collectCoin(coin))).then(
+            (results) => {
+              const collectedIds = new Set(
+                nearbyCoins.filter((_, index) => results[index]).map((coin) => coin.id),
+              );
+              if (collectedIds.size === 0) return;
+              nearbyCoins
+                .filter((coin) => collectedIds.has(coin.id))
+                .forEach((coin) => scheduleCoinRespawn(coin));
+              activeCoinsRef.current = activeCoinsRef.current.filter(
+                (coin) => !collectedIds.has(coin.id),
+              );
+              setActiveCoins(activeCoinsRef.current);
+              void getCoinBalance().then(setCoinBalance);
+              showFeedback({
+                id: "coin-collected",
+                type: "success",
+                message: `Moneda recogida · +${collectedIds.size}`,
+              });
+            },
+          );
+        }
+        const lastCoinCoordinate = lastCoinCoordinateRef.current;
+        const distanceFromLastCoin = lastCoinCoordinate
+          ? distanceInMeters(lastCoinCoordinate, newCoord)
+          : 0;
+        if (!lastCoinCoordinate || distanceFromLastCoin >= 20) {
+          const coin: MapCoin = {
+            id: `${sessionStartedAtRef.current}-${rawTrackRef.current.length}`,
+            ...centerCoinOnNearestRoad(newCoord, roadSegmentsRef.current),
+            value: 1,
+            availableAt: Date.now() + 15_000,
+          };
+          lastCoinCoordinateRef.current = newCoord;
+          activeCoinsRef.current = [...activeCoinsRef.current, coin];
+          setActiveCoins(activeCoinsRef.current);
+        }
+      }
+      mapRef.current?.injectJavaScript(
+        `window.setCoins?.(${JSON.stringify(activeCoinsRef.current)}); true;`,
+      );
       persistPoint(true);
       if (isOnlineRef.current) {
         void prefetchRoadRegionsNear(newCoord);
@@ -1663,7 +1893,7 @@ export default function MapScreen() {
 
       return true;
     },
-    [myPlayerId, playerProfile.color, scheduleRoadMatch],
+    [myPlayerId, playerProfile.color, scheduleCoinRespawn, scheduleRoadMatch],
   );
 
   const importStoredRoutePoints = useCallback(async () => {
@@ -1894,6 +2124,7 @@ export default function MapScreen() {
         setIntersectionCount(0);
         setRoadMatchStatus("waiting");
         lastAcceptedCoordinateRef.current = null;
+        lastCoinCoordinateRef.current = null;
         routeCoordsRef.current = [];
         mapRef.current?.injectJavaScript("window.clearRoute?.(); true;");
 
@@ -2054,10 +2285,23 @@ export default function MapScreen() {
         (multiplayerPreferences.showOtherTerritories ||
           territory.playerId === myPlayerId),
     );
+    const mapTerritories = visibleTerritories.map((territory) => {
+      const isMine = territory.playerId === myPlayerId;
+      const color = isMine
+        ? playerProfile.color
+        : contrastingMapColor(playerProfile.color);
+      return { ...territory, color, playerColor: color };
+    });
     mapRef.current?.injectJavaScript(
-      `window.setTerritories(${JSON.stringify(visibleTerritories)}); true;`,
+      `window.setTerritories(${JSON.stringify(mapTerritories)}); true;`,
     );
-  }, [mapStatus, multiplayerPreferences.showOtherTerritories, myPlayerId, territories]);
+  }, [
+    mapStatus,
+    multiplayerPreferences.showOtherTerritories,
+    myPlayerId,
+    playerProfile.color,
+    territories,
+  ]);
 
   useEffect(() => {
     if (!location || !playerProfile.globalId) return;
@@ -2227,6 +2471,7 @@ export default function MapScreen() {
           <Text style={[styles.statusText, { color: panelTextColor }]}>
             {isTracking ? "Recorrido activo" : "Recorrido detenido"}
           </Text>
+          <Text style={styles.coinBalance}>🪙 {coinBalance}</Text>
           {territories.length > 0 && (
             <Text style={styles.territoryCount}>
               {territories.length} territorio
@@ -2448,6 +2693,11 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: "#FFFFFF",
     flex: 1,
+  },
+  coinBalance: {
+    color: "#FFD54A",
+    fontSize: 15,
+    fontWeight: "900",
   },
   coordCount: {
     fontSize: 13,

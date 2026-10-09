@@ -48,6 +48,11 @@ import type { Territory, TerritoryShield } from "@/types/game";
 import { showFeedback } from "@/services/global-feedback";
 import { authenticateShieldPurchase } from "@/services/biometric-auth";
 import {
+  getCoinBalance,
+  spendCoins,
+  subscribeToCoinBalance,
+} from "@/services/coins";
+import {
   getGameSystemStatus,
   subscribeToGameSystemStatus,
 } from "@/services/game-system-status";
@@ -141,6 +146,7 @@ export function TerritoryShieldPanel({
     () => territories.filter((territory) => territory.playerId === playerId),
     [playerId, territories],
   );
+  const hasOwnedTerritory = ownedTerritories.length > 0;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [optionsVisible, setOptionsVisible] = useState(false);
@@ -151,6 +157,7 @@ export function TerritoryShieldPanel({
   const [products, setProducts] = useState<ShieldProduct[]>(DEFAULT_SHIELD_PRODUCTS);
   const [purchasedShields, setPurchasedShields] = useState<PurchasedShield[]>([]);
   const [freeAvailableAt, setFreeAvailableAt] = useState(0);
+  const [coinBalance, setCoinBalance] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [history, setHistory] = useState<ShieldPurchaseRecord[]>([]);
@@ -193,6 +200,11 @@ export function TerritoryShieldPanel({
     [freeAvailableAt, now, playerId, territories],
   );
   const selectedRemainingMs = getShieldRemainingMs(selected?.shield, now);
+  useEffect(() => {
+    void getCoinBalance().then(setCoinBalance);
+    return subscribeToCoinBalance(setCoinBalance);
+  }, []);
+
   useEffect(() => {
     if (selected && selected.id !== selectedId) setSelectedId(selected.id);
   }, [selected, selectedId]);
@@ -352,6 +364,37 @@ export function TerritoryShieldPanel({
       setBusy(null);
     }
   }, [applyShield, playerId, selected]);
+
+  const buyCoinShield = useCallback(async () => {
+    if (!selected) {
+      setMessage("Necesitas conquistar un territorio para activar el escudo.");
+      return;
+    }
+    if (!canApplyShieldDuration(selected.shield, 1, Date.now())) {
+      setMessage("Tu protección total no puede superar 36 horas.");
+      return;
+    }
+    setBusy("coins");
+    try {
+      const spent = await spendCoins(100);
+      if (!spent) {
+        setMessage("Necesitas 100 monedas para este escudo.");
+        return;
+      }
+      applyShield({
+        startedAt: Date.now(),
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        durationHours: 1,
+        source: "coins",
+      });
+      setMessage("Escudo de 1 hora activado con 100 monedas.");
+    } catch (error) {
+      console.warn("[Protección] No se pudo usar el saldo de monedas:", error);
+      setMessage("No se pudo usar el saldo de monedas.");
+    } finally {
+      setBusy(null);
+    }
+  }, [applyShield, selected]);
 
   const activatePurchasedShield = useCallback(async (purchasedShield: PurchasedShield) => {
     if (!selected) {
@@ -587,6 +630,24 @@ export function TerritoryShieldPanel({
                   {selected ? "ACTIVAR" : "GUARDADO"}
                 </Text>}
           </Pressable>
+
+          <Pressable
+            disabled={busy !== null || coinBalance < 100 || !selected}
+            onPress={() => void buyCoinShield()}
+            style={[
+              styles.coinShieldButton,
+              (busy !== null || coinBalance < 100 || !selected) && styles.disabled,
+            ]}
+            accessibilityRole="button"
+          >
+            <Text style={styles.freeTitle}>ESCUDO · 100 MONEDAS · 1 HORA</Text>
+            <Text style={styles.freeSubtitle}>
+              Tienes {coinBalance} monedas
+            </Text>
+            <Text style={[styles.protectionActionText, styles.freeActionText]}>
+              {busy === "coins" ? "ACTIVANDO..." : "USAR 100 MONEDAS"}
+            </Text>
+          </Pressable>
         </View>
       ))}
     </View>
@@ -660,12 +721,27 @@ export function TerritoryShieldPanel({
       )}
 
       <Text style={styles.testMode}>MODO DE PRUEBAS</Text>
+      <View style={styles.shieldExplanation}>
+        <Text style={styles.shieldExplanationTitle}>Cómo funciona</Text>
+        <Text style={styles.shieldExplanationText}>
+          1. Conquista un territorio para desbloquear los escudos.
+        </Text>
+        <Text style={styles.shieldExplanationText}>
+          2. Elige un escudo gratuito o compra uno manualmente.
+        </Text>
+        <Text style={styles.shieldExplanationText}>
+          3. Actívalo en uno de tus territorios. Mientras esté activo, los demás jugadores podrán ver su protección.
+        </Text>
+        <Text style={styles.shieldExplanationText}>
+          La protección se consume con el tiempo y nunca se activa ni se compra sola.
+        </Text>
+      </View>
       <Text style={styles.sectionTitle}>Territorio propio</Text>
       {!canActivate ? (
         <View style={styles.noTerritoryCard}>
           <Text style={styles.noTerritoryTitle}>Territorios: 0</Text>
           <Text style={styles.noTerritoryText}>
-            Puedes comprar escudos ahora. Quedarán guardados hasta que conquistes un territorio.
+            Los escudos aparecerán aquí después de que conquistes tu primer territorio.
           </Text>
         </View>
       ) : (
@@ -762,10 +838,28 @@ export function TerritoryShieldPanel({
     return (
       <View style={styles.inlinePanel}>
         <Text style={styles.inlineTitle}>Protección de territorios</Text>
-        {optionsContent}
+        {hasOwnedTerritory ? (
+          optionsContent
+        ) : (
+          <View style={styles.shieldLockedCard}>
+            <Image
+              source={SHIELD_ASSETS.available}
+              style={styles.lockedShieldImage}
+              contentFit="contain"
+              autoplay
+            />
+            <Text style={styles.shieldLockedTitle}>Escudos bloqueados</Text>
+            <Text style={styles.shieldLockedText}>
+              Conquista tu primer territorio para conocer los estados del escudo,
+              recibir el escudo gratuito y habilitar la compra y activación manual.
+            </Text>
+          </View>
+        )}
       </View>
     );
   }
+
+  if (!hasOwnedTerritory) return null;
 
   return (
     <>
@@ -1143,6 +1237,13 @@ const styles = StyleSheet.create({
   modalTitle: { color: "#FFFFFF", fontSize: 21, fontWeight: "900" },
   close: { color: "#83DFFF", fontSize: 14, fontWeight: "800" },
   testMode: { color: "#8993B2", fontSize: 9, fontWeight: "700", alignSelf: "flex-end" },
+  shieldExplanation: { backgroundColor: "#202744", borderRadius: 13, padding: 13, gap: 5 },
+  shieldExplanationTitle: { color: "#72E6BE", fontSize: 14, fontWeight: "900" },
+  shieldExplanationText: { color: "#C5CAE9", fontSize: 11, lineHeight: 16 },
+  shieldLockedCard: { alignItems: "center", backgroundColor: "#202744", borderRadius: 15, padding: 18, gap: 8 },
+  lockedShieldImage: { width: 112, height: 112 },
+  shieldLockedTitle: { color: "#FFFFFF", fontSize: 17, fontWeight: "900", textAlign: "center" },
+  shieldLockedText: { color: "#C5CAE9", fontSize: 12, lineHeight: 18, textAlign: "center" },
   sectionTitle: { color: "#C5CAE9", fontSize: 13, fontWeight: "800" },
   territoryRow: { gap: 8 },
   territoryChoice: { backgroundColor: "#242B4A", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9 },
@@ -1151,6 +1252,7 @@ const styles = StyleSheet.create({
   noTerritoryCard: { backgroundColor: "#242B4A", borderRadius: 12, padding: 13 },
   noTerritoryTitle: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },
   noTerritoryText: { color: "#C5CAE9", fontSize: 12, lineHeight: 18, marginTop: 4 },
+  coinShieldButton: { backgroundColor: "#B7791F", borderRadius: 14, padding: 14 },
   purchasedShieldCard: { backgroundColor: "#252C4D", borderRadius: 13, padding: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   stackedCard: { alignItems: "stretch", flexDirection: "column" },
   purchasedShieldText: { flex: 1 },

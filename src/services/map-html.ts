@@ -12,6 +12,19 @@ export const MAP_HTML = `<!doctype html>
     .offline-map { background-color: #e8edf2; background-image: linear-gradient(#cbd5df 1px, transparent 1px), linear-gradient(90deg, #cbd5df 1px, transparent 1px); background-size: 32px 32px; height: 100%; overflow: hidden; position: relative; width: 100%; }
     .offline-map svg { height: 100%; width: 100%; }
     .offline-note { background: rgba(26,26,46,.88); border-radius: 12px; color: white; font: 700 12px sans-serif; left: 50%; padding: 8px 12px; position: absolute; top: 12px; transform: translateX(-50%); white-space: nowrap; z-index: 2; }
+    .coin-marker { align-items: center; background: #FFD54A; border: 3px solid #FFF3A6; border-radius: 50%; box-shadow: 0 2px 7px rgba(78, 55, 0, .45); color: #7A5200; display: flex; font: 900 16px sans-serif; height: 30px; justify-content: center; width: 30px; }
+    .coin-marker span { line-height: 1; }
+    .coin-marker { animation: coinFloat 1.35s ease-in-out infinite; z-index: 900; }
+    .shield-marker { align-items: center; animation: shieldPending 1.8s ease-in-out infinite; background: rgba(255,255,255,.94); border: 2px dashed #8D99AE; border-radius: 50%; box-shadow: 0 2px 8px rgba(25,35,55,.28); color: #596579; display: flex; font: 900 15px sans-serif; height: 30px; justify-content: center; width: 30px; }
+    .shield-marker.active { animation: shieldPulse 1.5s ease-in-out infinite; border: 2px solid #66E3A4; color: #087443; }
+    .shield-marker span { line-height: 1; }
+    .shield-active { animation: shieldSvgPulse 1.5s ease-in-out infinite; fill: #087443; }
+    .shield-pending { animation: shieldSvgPending 1.8s ease-in-out infinite; fill: #596579; }
+    @keyframes shieldPending { 0%,100% { opacity: .52; } 50% { opacity: 1; } }
+    @keyframes shieldPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(102,227,164,.55), 0 2px 8px rgba(25,35,55,.28); } 50% { box-shadow: 0 0 0 9px rgba(102,227,164,0), 0 2px 10px rgba(25,35,55,.35); } }
+    @keyframes shieldSvgPulse { 0%,100% { opacity: .72; transform: scale(.9); transform-origin: center; } 50% { opacity: 1; transform: scale(1.12); transform-origin: center; } }
+    @keyframes shieldSvgPending { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+    @keyframes coinFloat { 0%,100% { margin-top: 0; } 50% { margin-top: -5px; } }
   </style>
 </head><body><div id="map"></div>
   <div id="map-failure">No se pudo iniciar el mapa. Comprueba la conexion a Internet.</div>
@@ -36,7 +49,7 @@ export const MAP_HTML = `<!doctype html>
       mapElement.innerHTML = '<div class="offline-note">Sin mapa base · el recorrido GPS se guarda</div><svg viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet"></svg>';
       const offlineSvg = mapElement.querySelector('svg');
       const svgNamespace = 'http://www.w3.org/2000/svg';
-      const offlineState = { route: [], territories: [], user: null, others: {}, userColor: '#208AEF' };
+      const offlineState = { route: [], territories: [], coins: [], user: null, others: {}, userColor: '#208AEF' };
 
       const offlineCoordinates = () => {
         const territoryPoints = offlineState.territories.flatMap(item =>
@@ -44,6 +57,7 @@ export const MAP_HTML = `<!doctype html>
         );
         return [
           ...offlineState.route,
+          ...offlineState.coins,
           ...territoryPoints,
           ...(offlineState.user ? [offlineState.user] : []),
           ...Object.values(offlineState.others),
@@ -68,7 +82,13 @@ export const MAP_HTML = `<!doctype html>
         });
 
         offlineState.territories.forEach(item => {
-          const ring = (item.polygon?.coordinates?.[0] || []).map(point => project({ latitude: point[1], longitude: point[0] }));
+          const sourceRing = item.polygon?.coordinates?.[0] || [];
+          const ringCoordinates = sourceRing.length > 0 &&
+            (sourceRing[0][0] !== sourceRing[sourceRing.length - 1][0] ||
+              sourceRing[0][1] !== sourceRing[sourceRing.length - 1][1])
+            ? [...sourceRing, sourceRing[0]]
+            : sourceRing;
+          const ring = ringCoordinates.map(point => project({ latitude: point[1], longitude: point[0] }));
           if (ring.length < 3) return;
           const polygon = document.createElementNS(svgNamespace, 'polygon');
           polygon.setAttribute('points', ring.map(point => point.x + ',' + point.y).join(' '));
@@ -79,6 +99,18 @@ export const MAP_HTML = `<!doctype html>
           polygon.setAttribute('stroke', item.playerColor || item.color || '#208AEF');
           polygon.setAttribute('stroke-width', '7');
           offlineSvg.appendChild(polygon);
+          const center = ring.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }), { x: 0, y: 0 });
+          center.x /= ring.length;
+          center.y /= ring.length;
+          const shield = document.createElementNS(svgNamespace, 'text');
+          const shieldActive = Number(item.shield?.expiresAt || 0) > Date.now();
+          shield.setAttribute('x', String(center.x));
+          shield.setAttribute('y', String(center.y + 7));
+          shield.setAttribute('text-anchor', 'middle');
+          shield.setAttribute('font-size', '22');
+          shield.setAttribute('class', shieldActive ? 'shield-active' : 'shield-pending');
+          shield.textContent = shieldActive ? '🛡' : '◌';
+          offlineSvg.appendChild(shield);
         });
 
         if (offlineState.route.length > 1) {
@@ -117,6 +149,28 @@ export const MAP_HTML = `<!doctype html>
         };
         Object.values(offlineState.others).forEach(point => drawPlayer(point, point.color || '#FF8800', 13));
         if (offlineState.user) drawPlayer(offlineState.user, offlineState.userColor, 16);
+        offlineState.coins.forEach(coin => {
+          const projected = project(coin);
+          const marker = document.createElementNS(svgNamespace, 'g');
+          const circle = document.createElementNS(svgNamespace, 'circle');
+          circle.setAttribute('cx', String(projected.x));
+          circle.setAttribute('cy', String(projected.y));
+          circle.setAttribute('r', '16');
+          circle.setAttribute('fill', '#FFD54A');
+          circle.setAttribute('stroke', '#FFF3A6');
+          circle.setAttribute('stroke-width', '5');
+          const text = document.createElementNS(svgNamespace, 'text');
+          text.setAttribute('x', String(projected.x));
+          text.setAttribute('y', String(projected.y + 7));
+          text.setAttribute('fill', '#7A5200');
+          text.setAttribute('font-size', '17');
+          text.setAttribute('font-weight', '900');
+          text.setAttribute('text-anchor', 'middle');
+          text.textContent = '🪙';
+          marker.appendChild(circle);
+          marker.appendChild(text);
+          offlineSvg.appendChild(marker);
+        });
       };
 
       window.setUserLocation = (latitude, longitude) => {
@@ -148,6 +202,10 @@ export const MAP_HTML = `<!doctype html>
       };
       window.clearRoute = () => {
         offlineState.route = [];
+        drawOfflineMap();
+      };
+      window.setCoins = coins => {
+        offlineState.coins = Array.isArray(coins) ? coins : [];
         drawOfflineMap();
       };
       window.addTerritory = (id, coordinates, color, owner, areaM2) => {
@@ -182,6 +240,14 @@ export const MAP_HTML = `<!doctype html>
       const otherTrails = {};
       const routeLayer = L.polyline([], { color: userColor, weight: 5 }).addTo(map);
       const territoryLayers = {};
+      const shieldLayers = {};
+      const coinLayers = {};
+      const coinIcon = L.divIcon({
+        className: 'coin-marker',
+        html: '<span>🪙</span>',
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
+      });
 
       const playerMarkerOptions = (color) => ({
         color: '#FFFFFF',
@@ -196,9 +262,14 @@ export const MAP_HTML = `<!doctype html>
         if (!layer) return;
         map.removeLayer(layer);
         delete territoryLayers[id];
+        const shieldLayer = shieldLayers[id];
+        if (shieldLayer) {
+          map.removeLayer(shieldLayer);
+          delete shieldLayers[id];
+        }
       };
 
-      const putTerritory = (id, latLngs, color, owner, areaM2, status) => {
+      const putTerritory = (id, latLngs, color, owner, areaM2, status, shield) => {
         removeTerritory(id);
         const pending = status === 'pending_capture' || status === 'pending_validation';
         const disputed = status === 'disputed';
@@ -217,6 +288,26 @@ export const MAP_HTML = `<!doctype html>
           direction: 'center',
           className: 'territory-label'
         }).addTo(map);
+        if (latLngs.length >= 3) {
+          const bounds = L.latLngBounds(latLngs);
+          const shieldActive = Number(shield?.expiresAt || 0) > Date.now();
+          const shieldIcon = L.divIcon({
+            className: 'shield-marker' + (shieldActive ? ' active' : ''),
+            html: '<span>' + (shieldActive ? '🛡' : '◌') + '</span>',
+            iconSize: [30, 30],
+            iconAnchor: [15, 15]
+          });
+          shieldLayers[id] = L.marker(bounds.getCenter(), {
+            icon: shieldIcon,
+            keyboard: false,
+            zIndexOffset: 400
+          }).bindTooltip(
+            shieldActive
+              ? 'Escudo activo · visible para todos'
+              : 'Escudo aún no activo',
+            { direction: 'top' }
+          ).addTo(map);
+        }
       };
 
       window.setUserLocation = (latitude, longitude, center) => {
@@ -292,20 +383,41 @@ export const MAP_HTML = `<!doctype html>
       window.clearRoute = () => {
         routeLayer.setLatLngs([]);
       };
+      window.setCoins = (coins) => {
+        Object.keys(coinLayers).forEach(id => {
+          map.removeLayer(coinLayers[id]);
+          delete coinLayers[id];
+        });
+        (coins || []).forEach(coin => {
+          coinLayers[coin.id] = L.marker([coin.latitude, coin.longitude], {
+            icon: coinIcon,
+            title: 'Moneda · +' + (coin.value || 1),
+            keyboard: false,
+            zIndexOffset: 1000
+          }).bindTooltip('Moneda · +' + (coin.value || 1), { direction: 'top' }).addTo(map);
+          coinLayers[coin.id].bringToFront();
+        });
+      };
       window.addTerritory = (id, coordinates, color, owner, areaM2) => {
-        putTerritory(id, coordinates.map(point => [point.latitude, point.longitude]), color, owner, areaM2, 'confirmed');
+        putTerritory(id, coordinates.map(point => [point.latitude, point.longitude]), color, owner, areaM2, 'confirmed', null);
       };
       window.setTerritories = (items) => {
         Object.keys(territoryLayers).forEach(removeTerritory);
         items.forEach(item => {
-          const ring = item.polygon?.coordinates?.[0] || [];
+          const sourceRing = item.polygon?.coordinates?.[0] || [];
+          const ring = sourceRing.length > 0 &&
+            (sourceRing[0][0] !== sourceRing[sourceRing.length - 1][0] ||
+              sourceRing[0][1] !== sourceRing[sourceRing.length - 1][1])
+            ? [...sourceRing, sourceRing[0]]
+            : sourceRing;
           putTerritory(
             item.id,
             ring.map(point => [point[1], point[0]]),
             item.playerColor || item.color,
             item.owner,
             item.areaM2,
-            item.status || 'confirmed'
+            item.status || 'confirmed',
+            item.shield || null
           );
         });
       };

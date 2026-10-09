@@ -78,6 +78,20 @@ export async function applyGlobalPlayerProfile(input: {
   return updated;
 }
 
+export async function applyAccountPlayerIdentity(input: {
+  id: string;
+  name: string;
+}) {
+  const current = await getOrCreatePlayerProfile();
+  const updated: PlayerProfile = {
+    ...current,
+    globalId: input.id,
+    name: input.name.trim().replace(/\s+/g, " ").slice(0, 30) || current.name,
+  };
+  await AsyncStorage.setItem(PLAYER_STORAGE_KEY, JSON.stringify(updated));
+  return updated;
+}
+
 export async function getOrCreatePlayerProfile() {
   const value = await AsyncStorage.getItem(PLAYER_STORAGE_KEY);
   if (value) {

@@ -74,6 +74,16 @@ function territoryFromRow(row: GlobalTerritoryRow): Territory | null {
     : isHexColor(payload.playerColor)
       ? payload.playerColor
       : "#208AEF";
+  const payloadShield = payload.shield ?? null;
+  const rowShield =
+    !payloadShield && row.shield_expires_at
+      ? {
+          startedAt: Date.now(),
+          expiresAt: Date.parse(row.shield_expires_at),
+          durationHours: 0,
+          source: "stripe" as const,
+        }
+      : null;
   return {
     ...payload,
     id: row.id,
@@ -84,7 +94,7 @@ function territoryFromRow(row: GlobalTerritoryRow): Territory | null {
     color: playerColor,
     status: row.status,
     regionIds: row.region_ids,
-    shield: payload.shield ?? null,
+    shield: payloadShield ?? rowShield,
   } as Territory;
 }
 
@@ -366,4 +376,3 @@ export class GlobalMultiplayerController {
     this.callbacks.onStatus("offline");
   }
 }
-

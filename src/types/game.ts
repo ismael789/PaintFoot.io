@@ -105,7 +105,7 @@ export interface TerritoryShield {
   startedAt: number;
   expiresAt: number;
   durationHours: number;
-  source?: "free" | "stripe";
+  source?: "free" | "stripe" | "coins";
   paymentId?: string | null;
 }
 
