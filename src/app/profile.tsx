@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { PaintFootSession as Session } from "@/services/auth";
@@ -79,6 +80,14 @@ import {
   setBiometricPurchaseEnabled,
   type BiometricPurchaseSettings,
 } from "@/services/biometric-auth";
+import {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  getNotificationPreferences,
+  registerPushToken,
+  saveNotificationPreferences,
+  type NotificationCategory,
+  type NotificationPreferences,
+} from "@/services/push-notifications";
 
 const OFFLINE_SIMULATION_ENABLED =
   __DEV__ && process.env.EXPO_PUBLIC_ENABLE_OFFLINE_SIMULATION === "true";
@@ -125,6 +134,8 @@ export default function ProfileScreen() {
   const [simulationVisible, setSimulationVisible] = useState(false);
   const [biometricSettings, setBiometricSettings] =
     useState<BiometricPurchaseSettings | null>(null);
+  const [notificationPreferences, setNotificationPreferences] =
+    useState<NotificationPreferences>(DEFAULT_NOTIFICATION_PREFERENCES);
   const setMessage = useCallback((nextMessage: string | null) => {
     if (!nextMessage) return;
     const failed = /no se pudo|no pudo|error|fall/i.test(nextMessage);
@@ -171,7 +182,7 @@ export default function ProfileScreen() {
     setLoading(true);
     setMessage(null);
     try {
-      const [nextProfile, storedTerritories, session, nextStorageStats, nextPreferences, nextTheme, nextBiometricSettings] = await Promise.all([
+      const [nextProfile, storedTerritories, session, nextStorageStats, nextPreferences, nextTheme, nextBiometricSettings, nextNotificationPreferences] = await Promise.all([
         getOrCreatePlayerProfile(),
         getStoredTerritories(),
         getLatestTrackingSession(),
@@ -179,6 +190,7 @@ export default function ProfileScreen() {
         getMultiplayerPreferences(),
         getThemePreference(),
         getBiometricPurchaseSettings(),
+        getNotificationPreferences(),
       ]);
       void sensorCapabilityManager.refresh();
       setProfile(nextProfile);
@@ -202,6 +214,7 @@ export default function ProfileScreen() {
       setMultiplayerPreferences(nextPreferences);
       setThemePreference(nextTheme);
       setBiometricSettings(nextBiometricSettings);
+      setNotificationPreferences(nextNotificationPreferences);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "No se pudo cargar el perfil.",
@@ -304,6 +317,37 @@ export default function ProfileScreen() {
     }
   }, [biometricSettings]);
 
+  const updateNotificationPreference = useCallback(
+    (category: NotificationCategory, enabled: boolean) => {
+      setNotificationPreferences((current) => {
+        const next = { ...current, [category]: enabled };
+        void saveNotificationPreferences(next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const activateNotifications = useCallback(async () => {
+    const result = await registerPushToken();
+    if (result.status === "registered") {
+      showFeedback({ id: "push-permission", type: "success", message: "Notificaciones activadas" });
+      return;
+    }
+    if (result.status === "permission-denied") {
+      showFeedback({ id: "push-permission", type: "warning", message: "Activa las notificaciones desde los ajustes" });
+      openGameNotificationSettings();
+      return;
+    }
+    showFeedback({
+      id: "push-permission",
+      type: "info",
+      message: result.status === "expo-go-unsupported"
+        ? "Notificaciones limitadas en Expo Go · disponibles en APK"
+        : "Notificaciones no disponibles por ahora",
+    });
+  }, []);
+
   const clearCache = useCallback(() => {
     Alert.alert(
       "Limpiar caché",
@@ -381,7 +425,7 @@ export default function ProfileScreen() {
   if (loading || !profile) {
     return (
       <View style={styles.loadingScreen}>
-        <ActivityIndicator color="#40C4FF" size="large" />
+        <ActivityIndicator color={Palette.sky400} size="large" />
         <Text style={styles.loadingText}>Cargando perfil...</Text>
       </View>
     );
@@ -428,8 +472,8 @@ export default function ProfileScreen() {
           autoCorrect={false}
           editable={false}
           placeholder="Nombre registrado"
-          placeholderTextColor="#6F7897"
-          selectionColor="#40C4FF"
+          placeholderTextColor={Palette.textMuted}
+          selectionColor={Palette.sky400}
           style={styles.input}
         />
         <Text style={styles.identifierHelp}>
@@ -479,7 +523,7 @@ export default function ProfileScreen() {
           ]}
         >
           {saving ? (
-            <ActivityIndicator color="#FFFFFF" />
+            <ActivityIndicator color={Palette.white} />
           ) : (
             <Text style={styles.saveButtonText}>Guardar perfil</Text>
           )}
@@ -534,7 +578,7 @@ export default function ProfileScreen() {
               autoCorrect={false}
               keyboardType="email-address"
               placeholder="Correo electrónico"
-              placeholderTextColor="#6F7897"
+              placeholderTextColor={Palette.textMuted}
               style={styles.input}
             />
             <TextInput
@@ -543,7 +587,7 @@ export default function ProfileScreen() {
               autoCapitalize="none"
               secureTextEntry
               placeholder="Contraseña"
-              placeholderTextColor="#6F7897"
+              placeholderTextColor={Palette.textMuted}
               style={styles.input}
             />
             <View style={styles.accountActions}>
@@ -616,11 +660,46 @@ export default function ProfileScreen() {
               disabled={!biometricSettings?.available}
               value={biometricSettings?.enabled ?? false}
               onValueChange={(value) => void updateBiometricPurchasePreference(value)}
-              trackColor={{ false: "#48506A", true: "#315E9E" }}
-              thumbColor={biometricSettings?.enabled ? "#40C4FF" : "#B0B7CA"}
+              trackColor={{ false: Palette.navy600, true: Palette.navy500 }}
+              thumbColor={biometricSettings?.enabled ? Palette.sky400 : Palette.textSecondary}
             />
           </View>
         </View>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Notificaciones</Text>
+        <Text style={styles.identifierHelp}>
+          {systemStatus.push === "expo-go-unsupported"
+            ? "Notificaciones limitadas en Expo Go. La APK admite push completo."
+            : pushStatusText(systemStatus.push)}
+        </Text>
+        {([
+          ["shields", "Escudos"],
+          ["territories", "Territorios"],
+          ["coins", "Monedas"],
+          ["sync", "Sincronización"],
+          ["world", "Mundo global"],
+          ["payments", "Pagos y compras"],
+        ] as [NotificationCategory, string][]).map(([category, label]) => (
+          <View key={category} style={styles.settingRow}>
+            <Text style={styles.settingLabel}>{label}</Text>
+            <Switch
+              accessibilityLabel={`Notificaciones de ${label}`}
+              value={notificationPreferences[category]}
+              onValueChange={(enabled) => updateNotificationPreference(category, enabled)}
+              trackColor={{ false: Palette.navy600, true: Palette.navy500 }}
+              thumbColor={notificationPreferences[category] ? Palette.sky400 : Palette.textSecondary}
+            />
+          </View>
+        ))}
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => void activateNotifications()}
+          style={({ pressed }) => [styles.cacheButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.cacheButtonText}>Activar notificaciones</Text>
+        </Pressable>
       </View>
 
       <View style={styles.card}>
@@ -733,8 +812,8 @@ export default function ProfileScreen() {
             <Switch
               value={multiplayerPreferences[key]}
               onValueChange={(value) => updateMultiplayerPreference(key, value)}
-              trackColor={{ false: "#48506A", true: "#315E9E" }}
-              thumbColor={multiplayerPreferences[key] ? "#40C4FF" : "#B0B7CA"}
+              trackColor={{ false: Palette.navy600, true: Palette.navy500 }}
+              thumbColor={multiplayerPreferences[key] ? Palette.sky400 : Palette.textSecondary}
             />
           </View>
         ))}
@@ -834,7 +913,7 @@ export default function ProfileScreen() {
               ]}
             >
               {clearingCache ? (
-                <ActivityIndicator color="#FFFFFF" />
+                <ActivityIndicator color={Palette.white} />
               ) : (
                 <Text style={styles.cacheButtonText}>Limpiar caché</Text>
               )}
@@ -861,77 +940,77 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#101426" },
+  screen: { flex: 1, backgroundColor: Palette.navy900 },
   content: { width: "100%", maxWidth: 720, alignSelf: "center", paddingHorizontal: 16, gap: 18 },
-  loadingScreen: { flex: 1, backgroundColor: "#101426", alignItems: "center", justifyContent: "center", gap: 12 },
-  loadingText: { color: "#C5CAE9", fontSize: 14 },
+  loadingScreen: { flex: 1, backgroundColor: Palette.navy900, alignItems: "center", justifyContent: "center", gap: 12 },
+  loadingText: { color: Palette.textSoft, fontSize: 14 },
   header: { flexDirection: "row", alignItems: "center", gap: 14 },
   headerCompact: { alignItems: "flex-start", flexDirection: "column" },
-  avatar: { width: 72, height: 72, borderRadius: 36, alignItems: "center", justifyContent: "center", borderWidth: 3, borderColor: "#FFFFFF" },
-  avatarText: { color: "#FFFFFF", fontSize: 30, fontWeight: "900" },
+  avatar: { width: 72, height: 72, borderRadius: 36, alignItems: "center", justifyContent: "center", borderWidth: 3, borderColor: Palette.white },
+  avatarText: { color: Palette.white, fontSize: 30, fontWeight: "900" },
   headerText: { flex: 1 },
-  title: { color: "#FFFFFF", fontSize: 25, fontWeight: "900" },
-  subtitle: { color: "#AAB2CF", fontSize: 13, marginTop: 4 },
-  card: { backgroundColor: "#1A1A2E", borderRadius: 18, padding: 16, gap: 10 },
-  cardTitle: { color: "#FFFFFF", fontSize: 18, fontWeight: "900", marginBottom: 2 },
-  label: { color: "#C5CAE9", fontSize: 12, fontWeight: "800", marginTop: 4 },
-  input: { color: "#FFFFFF", backgroundColor: "#252C4D", borderRadius: 12, borderWidth: 1, borderColor: "#39436B", fontSize: 16, paddingHorizontal: 13, paddingVertical: 12 },
+  title: { color: Palette.white, fontSize: 25, fontWeight: "900" },
+  subtitle: { color: Palette.textSecondary, fontSize: 13, marginTop: 4 },
+  card: { backgroundColor: Palette.navy900, borderRadius: 18, padding: 16, gap: 10 },
+  cardTitle: { color: Palette.white, fontSize: 18, fontWeight: "900", marginBottom: 2 },
+  label: { color: Palette.textSoft, fontSize: 12, fontWeight: "800", marginTop: 4 },
+  input: { color: Palette.white, backgroundColor: Palette.navy800, borderRadius: 12, borderWidth: 1, borderColor: Palette.navy700, fontSize: 16, paddingHorizontal: 13, paddingVertical: 12 },
   colorRow: { flexDirection: "row", flexWrap: "wrap", gap: 12, paddingVertical: 3 },
   colorButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
-  colorButtonSelected: { borderWidth: 3, borderColor: "#FFFFFF" },
-  check: { color: "#FFFFFF", fontSize: 20, fontWeight: "900" },
-  playerId: { color: "#80CBC4", backgroundColor: "#11182C", borderRadius: 9, padding: 10, fontFamily: "monospace", fontSize: 12 },
-  identifierHelp: { color: "#858FAC", fontSize: 11, lineHeight: 16 },
-  saveButton: { minHeight: 48, backgroundColor: "#3949AB", borderRadius: 13, alignItems: "center", justifyContent: "center", marginTop: 4 },
-  saveButtonText: { color: "#FFFFFF", fontSize: 15, fontWeight: "900" },
+  colorButtonSelected: { borderWidth: 3, borderColor: Palette.white },
+  check: { color: Palette.white, fontSize: 20, fontWeight: "900" },
+  playerId: { color: Palette.success, backgroundColor: Palette.navy900, borderRadius: 9, padding: 10, fontFamily: "monospace", fontSize: 12 },
+  identifierHelp: { color: Palette.textMuted, fontSize: 11, lineHeight: 16 },
+  saveButton: { minHeight: 48, backgroundColor: Palette.navy500, borderRadius: 13, alignItems: "center", justifyContent: "center", marginTop: 4 },
+  saveButtonText: { color: Palette.white, fontSize: 15, fontWeight: "900" },
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.55 },
   statsGrid: { flexDirection: "row", gap: 10 },
   statsGridCompact: { flexDirection: "column" },
-  statCard: { flex: 1, minHeight: 96, minWidth: 0, backgroundColor: "#1A1A2E", borderRadius: 16, alignItems: "center", justifyContent: "center", padding: 10 },
-  statValue: { color: "#72E6BE", fontSize: 20, fontWeight: "900" },
-  statLabel: { color: "#AAB2CF", fontSize: 11, textAlign: "center", marginTop: 5 },
+  statCard: { flex: 1, minHeight: 96, minWidth: 0, backgroundColor: Palette.navy900, borderRadius: 16, alignItems: "center", justifyContent: "center", padding: 10 },
+  statValue: { color: Palette.success, fontSize: 20, fontWeight: "900" },
+  statLabel: { color: Palette.textSecondary, fontSize: 11, textAlign: "center", marginTop: 5 },
   sessionDetails: { gap: 8 },
-  sessionText: { color: "#D6DAEA", fontSize: 13 },
-  emptyText: { color: "#929BB8", fontSize: 13, lineHeight: 19 },
+  sessionText: { color: Palette.textSoft, fontSize: 13 },
+  emptyText: { color: Palette.textMuted, fontSize: 13, lineHeight: 19 },
   storageRows: { gap: 10 },
   storageRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
-  storageLabel: { color: "#C5CAE9", fontSize: 13, flex: 1 },
-  storageValue: { color: "#72E6BE", fontSize: 13, fontWeight: "800" },
-  storageHelp: { color: "#858FAC", fontSize: 11, lineHeight: 16, marginTop: 2 },
-  cacheButton: { minHeight: 44, backgroundColor: "#33405F", borderRadius: 12, alignItems: "center", justifyContent: "center", marginTop: 4 },
-  cacheButtonText: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },
-  localNotice: { color: "#707A99", fontSize: 11, lineHeight: 17, textAlign: "center", paddingHorizontal: 18 },
-  accountEmail: { color: "#72E6BE", fontSize: 15, fontWeight: "800" },
-  accountValue: { color: "#F1F5FF", fontSize: 16, fontWeight: "800", marginBottom: 8 },
-  coinBalance: { color: "#FFD54A", fontSize: 15, fontWeight: "900", marginLeft: "auto" },
-  coinBalanceCard: { alignItems: "center", backgroundColor: "#1A2940", borderRadius: 16, flexDirection: "row", gap: 12, marginBottom: 16, padding: 14 },
+  storageLabel: { color: Palette.textSoft, fontSize: 13, flex: 1 },
+  storageValue: { color: Palette.success, fontSize: 13, fontWeight: "800" },
+  storageHelp: { color: Palette.textMuted, fontSize: 11, lineHeight: 16, marginTop: 2 },
+  cacheButton: { minHeight: 44, backgroundColor: Palette.navy700, borderRadius: 12, alignItems: "center", justifyContent: "center", marginTop: 4 },
+  cacheButtonText: { color: Palette.white, fontSize: 14, fontWeight: "900" },
+  localNotice: { color: Palette.textMuted, fontSize: 11, lineHeight: 17, textAlign: "center", paddingHorizontal: 18 },
+  accountEmail: { color: Palette.success, fontSize: 15, fontWeight: "800" },
+  accountValue: { color: Palette.ice50, fontSize: 16, fontWeight: "800", marginBottom: 8 },
+  coinBalance: { color: Palette.gold, fontSize: 15, fontWeight: "900", marginLeft: "auto" },
+  coinBalanceCard: { alignItems: "center", backgroundColor: Palette.navy800, borderRadius: 16, flexDirection: "row", gap: 12, marginBottom: 16, padding: 14 },
   coinBalanceIcon: { fontSize: 28 },
-  coinBalanceTitle: { color: "#AAB9D3", fontSize: 12, fontWeight: "700" },
-  coinBalanceValue: { color: "#FFD54A", fontSize: 24, fontWeight: "900", marginTop: 2 },
+  coinBalanceTitle: { color: Palette.textSecondary, fontSize: 12, fontWeight: "700" },
+  coinBalanceValue: { color: Palette.gold, fontSize: 24, fontWeight: "900", marginTop: 2 },
   accountActions: { gap: 9, marginTop: 4 },
-  accountButton: { minHeight: 48, backgroundColor: "#3949AB", borderRadius: 13, alignItems: "center", justifyContent: "center" },
-  accountButtonSecondary: { minHeight: 46, backgroundColor: "#33405F", borderRadius: 13, alignItems: "center", justifyContent: "center" },
+  accountButton: { minHeight: 48, backgroundColor: Palette.navy500, borderRadius: 13, alignItems: "center", justifyContent: "center" },
+  accountButtonSecondary: { minHeight: 46, backgroundColor: Palette.navy700, borderRadius: 13, alignItems: "center", justifyContent: "center" },
   globalColorRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   settingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 14, minHeight: 44 },
-  settingLabel: { color: "#D6DAEA", fontSize: 13, flex: 1 },
+  settingLabel: { color: Palette.textSoft, fontSize: 13, flex: 1 },
   settingTextWrap: { flex: 1, gap: 3 },
-  securitySection: { gap: 8, marginTop: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: "#303957" },
+  securitySection: { gap: 8, marginTop: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: Palette.navy700 },
   choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 9 },
   choiceRowCompact: { flexDirection: "column" },
-  choiceButton: { flex: 1, minWidth: 88, minHeight: 42, borderRadius: 11, backgroundColor: "#252C4D", alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#39436B" },
-  choiceButtonActive: { backgroundColor: "#3949AB", borderColor: "#72B8FF" },
-  choiceButtonText: { color: "#AAB2CF", fontSize: 13, fontWeight: "800" },
-  choiceButtonTextActive: { color: "#FFFFFF" },
+  choiceButton: { flex: 1, minWidth: 88, minHeight: 42, borderRadius: 11, backgroundColor: Palette.navy800, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: Palette.navy700 },
+  choiceButtonActive: { backgroundColor: Palette.navy500, borderColor: Palette.sky300 },
+  choiceButtonText: { color: Palette.textSecondary, fontSize: 13, fontWeight: "800" },
+  choiceButtonTextActive: { color: Palette.white },
   systemRows: { gap: 12 },
   systemRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 16 },
-  systemLabel: { color: "#C5CAE9", fontSize: 13, flex: 1 },
-  systemValue: { color: "#72E6BE", fontSize: 13, fontWeight: "800", flex: 1.4, flexShrink: 1, textAlign: "right" },
-  smallAction: { alignSelf: "flex-end", minHeight: 36, justifyContent: "center", backgroundColor: "#33405F", borderRadius: 10, paddingHorizontal: 12 },
-  smallActionText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
-  simulationButton: { minHeight: 64, marginTop: 4, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 13, borderWidth: 1, borderColor: "#3D5682", backgroundColor: "#202D4B", flexDirection: "row", alignItems: "center", gap: 10 },
+  systemLabel: { color: Palette.textSoft, fontSize: 13, flex: 1 },
+  systemValue: { color: Palette.success, fontSize: 13, fontWeight: "800", flex: 1.4, flexShrink: 1, textAlign: "right" },
+  smallAction: { alignSelf: "flex-end", minHeight: 36, justifyContent: "center", backgroundColor: Palette.navy700, borderRadius: 10, paddingHorizontal: 12 },
+  smallActionText: { color: Palette.white, fontSize: 12, fontWeight: "800" },
+  simulationButton: { minHeight: 64, marginTop: 4, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 13, borderWidth: 1, borderColor: Palette.navy600, backgroundColor: Palette.navy700, flexDirection: "row", alignItems: "center", gap: 10 },
   simulationButtonTextWrap: { flex: 1, gap: 3 },
-  simulationButtonTitle: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },
-  simulationButtonHelp: { color: "#9DA8C6", fontSize: 10, lineHeight: 15 },
-  simulationButtonArrow: { color: "#72B8FF", fontSize: 28, fontWeight: "500" },
+  simulationButtonTitle: { color: Palette.white, fontSize: 14, fontWeight: "900" },
+  simulationButtonHelp: { color: Palette.textSecondary, fontSize: 10, lineHeight: 15 },
+  simulationButtonArrow: { color: Palette.sky300, fontSize: 28, fontWeight: "500" },
 });

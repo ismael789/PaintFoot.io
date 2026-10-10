@@ -3,9 +3,11 @@ import { Directory, File, Paths } from "expo-file-system";
 
 import { getAppSpecificExternalFilesUri } from "@/services/monotonic-clock";
 import type { RoadSegment } from "@/types/game";
+import type { WorldCoin } from "@/services/world-coins";
 
 const DATA_DIRECTORY_NAME = "paintfoot-data";
 const ROAD_CACHE_DIRECTORY_NAME = "road-cache";
+const COIN_CACHE_DIRECTORY_NAME = "coins";
 
 export interface RoadCacheBlockWriteResult {
   relativePath: string;
@@ -26,6 +28,10 @@ function roadCacheDirectory(root = primaryStorageRoot()) {
   return new Directory(dataDirectory(root), ROAD_CACHE_DIRECTORY_NAME);
 }
 
+function coinCacheDirectory(root = primaryStorageRoot()) {
+  return new Directory(dataDirectory(root), COIN_CACHE_DIRECTORY_NAME);
+}
+
 function ensureRoadCacheDirectory() {
   const root = dataDirectory();
   if (!root.exists) root.create({ idempotent: true, intermediates: true });
@@ -34,6 +40,14 @@ function ensureRoadCacheDirectory() {
     roadCache.create({ idempotent: true, intermediates: true });
   }
   return roadCache;
+}
+
+function ensureCoinCacheDirectory() {
+  const root = dataDirectory();
+  if (!root.exists) root.create({ idempotent: true, intermediates: true });
+  const coins = coinCacheDirectory();
+  if (!coins.exists) coins.create({ idempotent: true, intermediates: true });
+  return coins;
 }
 
 function safeRegionName(regionId: string) {
@@ -45,6 +59,15 @@ function blockFile(regionId: string, root = primaryStorageRoot()) {
     root.uri === primaryStorageRoot().uri
       ? ensureRoadCacheDirectory()
       : roadCacheDirectory(root),
+    `${safeRegionName(regionId)}.json`,
+  );
+}
+
+function coinBlockFile(regionId: string, root = primaryStorageRoot()) {
+  return new File(
+    root.uri === primaryStorageRoot().uri
+      ? ensureCoinCacheDirectory()
+      : coinCacheDirectory(root),
     `${safeRegionName(regionId)}.json`,
   );
 }
@@ -102,6 +125,42 @@ export async function readRoadCacheBlock(
     };
     return parsed.version === 1 && Array.isArray(parsed.segments)
       ? parsed.segments
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeCoinRegionBlock(
+  regionId: string,
+  coins: WorldCoin[],
+): Promise<RoadCacheBlockWriteResult> {
+  const contents = JSON.stringify({ version: 1, regionId, coins });
+  const file = coinBlockFile(regionId);
+  file.write(contents);
+  return {
+    relativePath: `${COIN_CACHE_DIRECTORY_NAME}/${file.name}`,
+    sizeBytes: file.size,
+    contentHash: await sha256(contents),
+  };
+}
+
+export async function readCoinRegionBlock(
+  regionId: string,
+  expectedHash?: string,
+): Promise<WorldCoin[] | null> {
+  const file = coinBlockFile(regionId);
+  if (!file.exists) return null;
+  try {
+    const contents = await file.text();
+    if (expectedHash && (await sha256(contents)) !== expectedHash) return null;
+    const parsed = JSON.parse(contents) as {
+      version?: number;
+      regionId?: string;
+      coins?: WorldCoin[];
+    };
+    return parsed.version === 1 && parsed.regionId === regionId && Array.isArray(parsed.coins)
+      ? parsed.coins
       : null;
   } catch {
     return null;

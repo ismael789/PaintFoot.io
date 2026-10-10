@@ -1,5 +1,8 @@
+
 import { Platform } from "react-native";
+
 import * as Location from "expo-location";
+
 import {
   Accelerometer,
   Barometer,
@@ -12,18 +15,25 @@ import {
 } from "expo-sensors";
 
 import { SENSOR_RULES } from "../config/territory";
+
 import {
   type AndroidSensorEvent,
   type AndroidSensorId,
   startAndroidSensors,
   stopAndroidSensors,
 } from "../../modules/paintfoot-android-sensors";
+
 import {
   calculateMagneticConfidence,
   detectProbablePocket,
   SensorSessionAccumulator,
 } from "./sensor-metrics";
-import { sensorCapabilityManager } from "./sensor-capabilities";
+
+import {
+  sensorCapabilityManager,
+  type SensorCapabilityId,
+} from "./sensor-capabilities";
+
 import type {
   SensorAvailability,
   SensorEvidence,
@@ -64,6 +74,8 @@ function emptyEvidence(lightSensor = false): SensorEvidence {
   return {
     timestamp: 0,
     availability: { ...EMPTY_AVAILABILITY, lightSensor },
+    activeSensors: { ...EMPTY_AVAILABILITY },
+    sensorReadingsAt: {},
     compassAccuracy: null,
     compassHeadingDegrees: null,
     gyroscopeRotationRateRadS: null,
@@ -108,11 +120,52 @@ export class MotionSensorTracker {
   private nativeProximityEnabled = false;
   private nativeSyncGeneration = 0;
   private nativeSyncPromise: Promise<void> = Promise.resolve();
+  private lightRequestId = 0;
+  private permissionIssues: ("motion" | "pedometer")[] = [];
   private lightListener:
     | ((illuminanceLux: number, proximityNear: boolean | null) => void)
     | null = null;
   private nativeLastReadingAt = new Map<AndroidSensorId, number>();
   private nativeWatchdog: ReturnType<typeof setInterval> | null = null;
+  private sessionWatchdog: ReturnType<typeof setInterval> | null = null;
+  private sessionStartedAt = 0;
+
+  private startSessionWatchdog() {
+    if (this.sessionWatchdog) clearInterval(this.sessionWatchdog);
+    const continuousIds: (keyof SensorAvailability)[] = [
+      "accelerometer",
+      "barometer",
+      "compass",
+      "deviceMotion",
+      "gyroscope",
+      "magnetometer",
+      "uncalibratedMagnetometer",
+      "proximity",
+      "gravity",
+      "linearAcceleration",
+      "rotationVector",
+      "gameRotationVector",
+      "geomagneticRotationVector",
+    ];
+    this.sessionWatchdog = setInterval(() => {
+      if (!this.active) return;
+      const now = Date.now();
+      for (const id of continuousIds) {
+        if (!this.evidence.availability[id]) continue;
+        const lastReading =
+          this.evidence.sensorReadingsAt?.[id] ?? this.sessionStartedAt;
+        if (
+          now - lastReading >
+          SENSOR_RULES.nativeContinuousSensorTimeoutMs
+        ) {
+          if (this.evidence.activeSensors) {
+            this.evidence.activeSensors[id] = false;
+          }
+          sensorCapabilityManager.markTemporaryUnavailable(id);
+        }
+      }
+    }, SENSOR_RULES.nativeContinuousSensorTimeoutMs / 2);
+  }
 
   private refreshMetrics() {
     const metrics = this.accumulator.getMetrics();
@@ -138,7 +191,29 @@ export class MotionSensorTracker {
     });
     this.accumulator.setMagneticConfidence(confidence);
     this.refreshMetrics();
-    sensorCapabilityManager.publishEvidence(this.evidence);
+  }
+
+  private markSensorReading(id: keyof SensorAvailability) {
+    const now = Date.now();
+    this.evidence.activeSensors = {
+      ...this.evidence.activeSensors,
+      [id]: true,
+    };
+    this.evidence.sensorReadingsAt = {
+      ...this.evidence.sensorReadingsAt,
+      [id]: now,
+    };
+  }
+
+  private addSessionSubscription(
+    id: SensorCapabilityId,
+    subscribe: () => RemovableSubscription,
+  ) {
+    try {
+      this.subscriptions.push(subscribe());
+    } catch {
+      sensorCapabilityManager.markTemporaryUnavailable(id);
+    }
   }
 
   private update(values: Partial<SensorEvidence>) {
@@ -149,6 +224,7 @@ export class MotionSensorTracker {
       availability: { ...this.evidence.availability },
     };
     this.refreshMetrics();
+    sensorCapabilityManager.publishEvidence(this.evidence);
     const now = Date.now();
     if (
       this.evidenceListener &&
@@ -163,12 +239,15 @@ export class MotionSensorTracker {
     return {
       ...this.evidence,
       availability: { ...this.evidence.availability },
+      activeSensors: { ...this.evidence.activeSensors },
+      sensorReadingsAt: { ...this.evidence.sensorReadingsAt },
     };
   }
 
   private handleAndroidSensorEvent(event: AndroidSensorEvent) {
     this.nativeLastReadingAt.set(event.id, Date.now());
     this.evidence.availability[event.id] = true;
+    this.markSensorReading(event.id);
     const [x = 0, y = 0, z = 0] = event.values;
     switch (event.id) {
       case "proximity": {
@@ -257,7 +336,7 @@ export class MotionSensorTracker {
             ? ["proximity"]
             : [];
         if (ids.length === 0) {
-          sensorCapabilityManager.publishNativeActive([]);
+          sensorCapabilityManager.publishNativeRegistered([]);
           return;
         }
 
@@ -266,6 +345,11 @@ export class MotionSensorTracker {
             ids,
             SENSOR_RULES.nativeAndroidSensorIntervalMs,
             (event) => this.handleAndroidSensorEvent(event),
+            (event) =>
+              sensorCapabilityManager.publishNativeAccuracy(
+                event.id,
+                event.accuracy,
+              ),
           );
           if (generation !== this.nativeSyncGeneration) {
             result?.subscription.remove();
@@ -274,9 +358,9 @@ export class MotionSensorTracker {
           if (!result) return;
           this.nativeSubscription = result.subscription;
           const activeIds = new Set(result.activeIds);
-          const startedAt = Date.now();
+          const registeredAt = Date.now();
           for (const id of result.activeIds) {
-            this.nativeLastReadingAt.set(id, startedAt);
+            this.nativeLastReadingAt.set(id, registeredAt);
           }
           this.evidence.availability = {
             ...this.evidence.availability,
@@ -291,7 +375,7 @@ export class MotionSensorTracker {
             stepDetector: activeIds.has("stepDetector"),
             significantMotion: activeIds.has("significantMotion"),
           };
-          sensorCapabilityManager.publishNativeActive(result.activeIds);
+          sensorCapabilityManager.publishNativeRegistered(result.activeIds);
           sensorCapabilityManager.publishEvidence(this.evidence);
           const continuousIds: AndroidSensorId[] = [
             "gravity",
@@ -308,13 +392,17 @@ export class MotionSensorTracker {
                 now - (this.nativeLastReadingAt.get(id) ?? 0) >
                   SENSOR_RULES.nativeContinuousSensorTimeoutMs
               ) {
-                this.evidence.availability[id] = false;
+                if (this.evidence.activeSensors) {
+                  this.evidence.activeSensors[id] = false;
+                }
                 sensorCapabilityManager.markTemporaryUnavailable(id);
               }
             }
           }, SENSOR_RULES.nativeContinuousSensorTimeoutMs / 2);
         } catch {
-          sensorCapabilityManager.publishNativeActive([]);
+          for (const id of ids) {
+            sensorCapabilityManager.markTemporaryUnavailable(id);
+          }
         }
       });
     return this.nativeSyncPromise;
@@ -327,6 +415,7 @@ export class MotionSensorTracker {
     this.accumulator = new SensorSessionAccumulator();
     this.rawMagneticSamples = [];
     this.lastEvidenceNotificationAt = 0;
+    this.sessionStartedAt = Date.now();
     const lightAvailable = Boolean(this.evidence.availability.lightSensor);
     this.evidence = emptyEvidence(lightAvailable);
     this.nativeSessionEnabled = true;
@@ -354,8 +443,21 @@ export class MotionSensorTracker {
       pedometerPermissionGranted = false;
     }
 
-    const [accelerometer, barometer, deviceMotion, gyroscope, magnetometer,
-      pedometer, uncalibratedMagnetometer] = await Promise.all([
+    this.permissionIssues = [
+      ...(motionPermissionGranted ? [] : (["motion"] as const)),
+      ...(pedometerPermissionGranted ? [] : (["pedometer"] as const)),
+    ];
+    sensorCapabilityManager.publishPermissionIssues(this.permissionIssues);
+
+    const [
+      accelerometer,
+      barometer,
+      deviceMotion,
+      gyroscope,
+      magnetometer,
+      pedometer,
+      uncalibratedMagnetometer,
+    ] = await Promise.all([
       motionPermissionGranted
         ? safeAvailability(() => Accelerometer.isAvailableAsync())
         : false,
@@ -392,65 +494,74 @@ export class MotionSensorTracker {
       pedometer,
       uncalibratedMagnetometer,
     };
+    sensorCapabilityManager.publishDetectedAvailability(
+      this.evidence.availability,
+    );
 
     if (accelerometer) {
-      Accelerometer.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
-      this.subscriptions.push(
-        Accelerometer.addListener(({ x, y, z }) => {
+      this.addSessionSubscription("accelerometer", () => {
+        Accelerometer.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
+        return Accelerometer.addListener(({ x, y, z }) => {
+          this.markSensorReading("accelerometer");
           const accelerationDeltaG = Math.abs(Math.hypot(x, y, z) - 1);
           this.update({
             accelerationDeltaG,
             moving:
               accelerationDeltaG >= SENSOR_RULES.movementAccelerationDeltaG,
           });
-        }),
-      );
+        });
+      });
     }
 
     if (gyroscope) {
-      Gyroscope.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
-      this.subscriptions.push(
-        Gyroscope.addListener(({ x, y, z }) => {
+      this.addSessionSubscription("gyroscope", () => {
+        Gyroscope.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
+        return Gyroscope.addListener(({ x, y, z }) => {
+          this.markSensorReading("gyroscope");
           this.update({ gyroscopeRotationRateRadS: Math.hypot(x, y, z) });
-        }),
-      );
+        });
+      });
     }
 
     if (deviceMotion) {
-      DeviceMotion.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
-      this.subscriptions.push(
-        DeviceMotion.addListener(({ rotationRate }) => {
-          if (!rotationRate) return;
+      this.addSessionSubscription("deviceMotion", () => {
+        DeviceMotion.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
+        return DeviceMotion.addListener(({ rotationRate }) => {
+          this.markSensorReading("deviceMotion");
           this.update({
-            deviceMotionRotationRateDegS: Math.hypot(
-              rotationRate.alpha,
-              rotationRate.beta,
-              rotationRate.gamma,
-            ),
+            deviceMotionRotationRateDegS: rotationRate
+              ? Math.hypot(
+                  rotationRate.alpha,
+                  rotationRate.beta,
+                  rotationRate.gamma,
+                )
+              : null,
           });
-        }),
-      );
+        });
+      });
     }
 
     if (magnetometer) {
-      Magnetometer.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
-      this.subscriptions.push(
-        Magnetometer.addListener(({ x, y, z }) => {
+      this.addSessionSubscription("magnetometer", () => {
+        Magnetometer.setUpdateInterval(SENSOR_RULES.updateIntervalMs);
+        return Magnetometer.addListener(({ x, y, z }) => {
+          this.markSensorReading("magnetometer");
           this.evidence.magneticFieldMicrotesla = Math.hypot(x, y, z);
           this.refreshMagneticConfidence();
           this.update({
             magneticFieldMicrotesla: this.evidence.magneticFieldMicrotesla,
           });
-        }),
-      );
+        });
+      });
     }
 
     if (uncalibratedMagnetometer) {
-      MagnetometerUncalibrated.setUpdateInterval(
-        SENSOR_RULES.uncalibratedMagnetometerIntervalMs,
-      );
-      this.subscriptions.push(
-        MagnetometerUncalibrated.addListener(({ x, y, z }) => {
+      this.addSessionSubscription("uncalibratedMagnetometer", () => {
+        MagnetometerUncalibrated.setUpdateInterval(
+          SENSOR_RULES.uncalibratedMagnetometerIntervalMs,
+        );
+        return MagnetometerUncalibrated.addListener(({ x, y, z }) => {
+          this.markSensorReading("uncalibratedMagnetometer");
           const magnitude = Math.hypot(x, y, z);
           this.rawMagneticSamples.push(magnitude);
           this.rawMagneticSamples = this.rawMagneticSamples.slice(-5);
@@ -463,23 +574,25 @@ export class MotionSensorTracker {
             rawMagneticFieldMicrotesla: magnitude,
             magneticFieldInstabilityMicrotesla: maximum - minimum,
           });
-        }),
-      );
+        });
+      });
     }
 
     if (barometer) {
-      Barometer.setUpdateInterval(SENSOR_RULES.barometerIntervalMs);
-      this.subscriptions.push(
-        Barometer.addListener(({ pressure, relativeAltitude }) => {
+      this.addSessionSubscription("barometer", () => {
+        Barometer.setUpdateInterval(SENSOR_RULES.barometerIntervalMs);
+        return Barometer.addListener(({ pressure, relativeAltitude }) => {
+          this.markSensorReading("barometer");
           this.accumulator.updatePressure(pressure, relativeAltitude);
           this.update({});
-        }),
-      );
+        });
+      });
     }
 
     if (pedometer) {
-      this.subscriptions.push(
+      this.addSessionSubscription("pedometer", () =>
         Pedometer.watchStepCount(({ steps }) => {
+          this.markSensorReading("pedometer");
           this.accumulator.updateSteps(steps);
           this.update({});
         }),
@@ -505,6 +618,7 @@ export class MotionSensorTracker {
           if (!this.active || generation !== this.generation) return;
           const compassHeadingDegrees =
             heading.trueHeading >= 0 ? heading.trueHeading : heading.magHeading;
+          this.markSensorReading("compass");
           this.evidence.availability.compass = true;
           this.evidence.compassAccuracy = heading.accuracy;
           this.refreshMagneticConfidence();
@@ -514,7 +628,10 @@ export class MotionSensorTracker {
           });
         },
         () => {
-          this.evidence.availability.compass = false;
+          if (this.evidence.activeSensors) {
+            this.evidence.activeSensors.compass = false;
+          }
+          sensorCapabilityManager.markTemporaryUnavailable("compass");
         },
       );
       if (!this.active || generation !== this.generation) {
@@ -530,6 +647,7 @@ export class MotionSensorTracker {
     if (!this.active || generation !== this.generation) {
       return { ...this.evidence.availability };
     }
+    this.startSessionWatchdog();
     this.update({});
     return { ...this.evidence.availability };
   }
@@ -541,40 +659,61 @@ export class MotionSensorTracker {
       proximityNear: boolean | null,
     ) => void,
   ) {
+    const requestId = ++this.lightRequestId;
+
     this.lightSubscription?.remove();
     this.lightSubscription = null;
     this.lightListener = onIlluminance ?? null;
     this.nativeProximityEnabled = enabled;
     void this.syncAndroidSensors();
+
     if (!enabled) {
-      this.evidence.availability.lightSensor = false;
+      if (this.evidence.activeSensors) {
+        this.evidence.activeSensors.lightSensor = false;
+      }
+      sensorCapabilityManager.publishEvidence(this.evidence);
       this.lightListener = null;
       return false;
     }
 
     const available = await safeAvailability(() => LightSensor.isAvailableAsync());
+    if (requestId !== this.lightRequestId) return false;
+
     this.evidence.availability.lightSensor = available;
+    sensorCapabilityManager.publishDetectedAvailability(
+      this.evidence.availability,
+    );
     if (!available) return false;
 
-    LightSensor.setUpdateInterval(SENSOR_RULES.lightSensorIntervalMs);
-    this.lightSubscription = LightSensor.addListener(({ illuminance }) => {
-      this.evidence.ambientLightLux = illuminance;
-      const proximityNear = this.evidence.proximityNear ?? null;
-      this.evidence.probablePocket = detectProbablePocket(
-        illuminance,
-        proximityNear,
-      );
-      this.lightListener?.(illuminance, proximityNear);
-      this.update({
-        ambientLightLux: illuminance,
-        probablePocket: this.evidence.probablePocket,
+    try {
+      LightSensor.setUpdateInterval(SENSOR_RULES.lightSensorIntervalMs);
+      this.lightSubscription = LightSensor.addListener(({ illuminance }) => {
+        this.markSensorReading("lightSensor");
+        this.evidence.ambientLightLux = illuminance;
+        const proximityNear = this.evidence.proximityNear ?? null;
+        this.evidence.probablePocket = detectProbablePocket(
+          illuminance,
+          proximityNear,
+        );
+        this.lightListener?.(illuminance, proximityNear);
+        this.update({
+          ambientLightLux: illuminance,
+          probablePocket: this.evidence.probablePocket,
+        });
       });
-    });
+    } catch {
+      sensorCapabilityManager.markTemporaryUnavailable("lightSensor");
+      return false;
+    }
     return true;
   }
 
   stopSession(): SensorSessionMetrics {
     this.active = false;
+    if (this.sessionWatchdog) {
+      clearInterval(this.sessionWatchdog);
+      this.sessionWatchdog = null;
+    }
     this.nativeSessionEnabled = false;
     void this.syncAndroidSensors();
     this.generation += 1;
@@ -593,14 +732,23 @@ export class MotionSensorTracker {
   }
 
   stop() {
+    this.lightRequestId += 1;
+
     const metrics = this.stopSession();
     this.lightSubscription?.remove();
     this.lightSubscription = null;
     this.lightListener = null;
     this.nativeProximityEnabled = false;
     void this.syncAndroidSensors();
-    this.evidence.availability.lightSensor = false;
+    if (this.evidence.activeSensors) {
+      this.evidence.activeSensors.lightSensor = false;
+    }
+    sensorCapabilityManager.publishEvidence(this.evidence);
     return metrics;
+  }
+
+  getPermissionIssues() {
+    return [...this.permissionIssues];
   }
 
   getEvidence(): SensorEvidence | undefined {

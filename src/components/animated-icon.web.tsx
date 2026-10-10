@@ -1,3 +1,4 @@
+import { Palette } from '@/constants/palette';
 import { Image } from 'expo-image';
 import { StyleSheet, View } from 'react-native';
 import Animated, { Keyframe, Easing } from 'react-native-reanimated';
@@ -62,7 +63,7 @@ export function AnimatedIcon() {
       </Animated.View>
 
       <Animated.View style={styles.background} entering={keyframe.duration(DURATION)}>
-        <div className={classes.expoLogoBackground} />
+        <div className={classes.expoLogoBackground} style={{ backgroundImage: `linear-gradient(180deg, ${Palette.sky400}, ${Palette.navy500})` }} />
       </Animated.View>
 
       <Animated.View style={styles.imageContainer} entering={logoKeyframe.duration(DURATION)}>

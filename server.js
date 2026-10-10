@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const http = require("http");
 const WebSocket = require("ws");
+const { createClient } = require("@supabase/supabase-js");
 const { startStripeApi } = require("./stripe-api");
 const { shieldServerStore } = require("./shield-server-store");
 const { startCustomAuthServer } = require("./custom-auth-server");
@@ -9,6 +10,14 @@ const { startCustomAuthServer } = require("./custom-auth-server");
 const DEFAULT_WS_PORT = 8082;
 const MAX_PORT_ATTEMPTS = 20;
 const expoPushEndpoint = "https://exp.host/--/api/v2/push/send";
+const pushSupabase = process.env.EXPO_PUBLIC_SUPABASE_URL &&
+  (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(
+      process.env.EXPO_PUBLIC_SUPABASE_URL,
+      process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY,
+      { auth: { autoRefreshToken: false, persistSession: false } },
+    )
+  : null;
 
 // Almacena la última ubicación y el tiempo de cada jugador
 const players = {};
@@ -22,11 +31,42 @@ function isExpoPushToken(value) {
 }
 
 async function sendTerritoryPush(excludedPlayerId, owner) {
+  const persistedTokens = [];
+  if (pushSupabase) {
+    const { data, error } = await pushSupabase
+      .from("push_tokens")
+      .select("expo_push_token,user_id")
+      .eq("enabled", true);
+    if (error) {
+      console.warn("[Push] No se pudieron consultar tokens persistidos:", error.message);
+    } else {
+      const userIds = [...new Set((data || []).map((row) => row.user_id))];
+      const { data: preferences } = userIds.length > 0
+        ? await pushSupabase
+            .from("notification_preferences")
+            .select("user_id,territories,world")
+            .in("user_id", userIds)
+        : { data: [] };
+      const preferencesByUser = new Map((preferences || []).map((value) => [value.user_id, value]));
+      for (const row of data || []) {
+        const preference = preferencesByUser.get(row.user_id);
+        if (
+          row.user_id !== excludedPlayerId &&
+          preference?.territories !== false &&
+          preference?.world !== false &&
+          isExpoPushToken(row.expo_push_token)
+        ) persistedTokens.push(row.expo_push_token);
+      }
+    }
+  }
   const tokens = [
     ...new Set(
-      Object.entries(pushTokens)
-        .filter(([playerId]) => playerId !== excludedPlayerId)
-        .map(([, token]) => token),
+      [
+        ...persistedTokens,
+        ...Object.entries(pushTokens)
+          .filter(([playerId]) => playerId !== excludedPlayerId)
+          .map(([, token]) => token),
+      ],
     ),
   ];
 
@@ -37,8 +77,8 @@ async function sendTerritoryPush(excludedPlayerId, owner) {
     sound: "default",
     title: "Territorio conquistado",
     body: `${owner} conquisto un nuevo territorio.`,
-    data: { url: "/" },
-    channelId: "game-events",
+    data: { url: "paintfoot://map" },
+    channelId: "paintfoot-territories",
   }));
 
   const response = await fetch(expoPushEndpoint, {

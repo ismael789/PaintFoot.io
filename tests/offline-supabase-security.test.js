@@ -18,11 +18,12 @@ const nativeModule = read(
   "expo", "modules", "paintfootandroidsensors", "PaintFootAndroidSensorsModule.kt",
 );
 
-test("auth: registro, login, logout y restauracion usan Supabase Auth", () => {
-  assert.match(auth, /auth\.signUp/);
-  assert.match(auth, /auth\.signInWithPassword/);
-  assert.match(auth, /auth\.signOut/);
-  assert.match(auth, /auth\.getSession/);
+test("auth: registro, login, logout y restauracion usan la API de cuentas propia", () => {
+  assert.match(auth, /requestAuth\("\/register"/);
+  assert.match(auth, /requestAuth\("\/login"/);
+  assert.match(auth, /\/logout/);
+  assert.match(auth, /getPersistedAuthSession/);
+  assert.doesNotMatch(auth, /supabase\.auth|auth\.(signUp|signInWithPassword|getSession|signOut)/);
 });
 
 test("Supabase: RLS limita territorios, sesiones y puntos a auth.uid", () => {
@@ -90,4 +91,3 @@ test("seguridad: service_role no esta en codigo ejecutable de la app", () => {
     assert.doesNotMatch(read(...relative), /service_role/i);
   }
 });
-

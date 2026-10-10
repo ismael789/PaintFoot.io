@@ -51,11 +51,28 @@ export interface PurchasedShield {
   id: string;
   durationHours: number;
   productId: string;
+  amount: number | null;
+  currency: string | null;
+  stripeMode: "test" | "live";
   purchasedAt: number;
+}
+
+export interface ServerShieldPurchaseHistory {
+  id: string;
+  sessionId: string;
+  productId: string;
+  territoryId: string | null;
+  durationHours: number;
+  amount: number | null;
+  currency: string | null;
+  stripeMode: "test" | "live";
+  status: "pending" | "approved" | "rejected" | "canceled";
+  createdAt: number;
 }
 
 export type PlayerShieldServerStatus = Omit<ShieldServerStatus, "shield"> & {
   purchased_shields: PurchasedShield[];
+  purchase_history: ServerShieldPurchaseHistory[];
 };
 
 let resolvedStripeApiBaseUrl: string | null = null;
@@ -193,6 +210,7 @@ export function createShieldCheckout(input: {
   territoryId?: string | null;
   playerId: string;
   purchaseReference: string;
+  returnUrl: string;
 }) {
   return stripeFetch<StripeCheckoutSession>("/shield/checkout", {
     method: "POST",
@@ -201,6 +219,7 @@ export function createShieldCheckout(input: {
       ...(input.territoryId ? { territory_id: input.territoryId } : {}),
       player_id: input.playerId,
       purchase_reference: input.purchaseReference,
+      return_url: input.returnUrl,
     }),
   });
 }

@@ -141,3 +141,16 @@ test("prueba 24: sensor fallido queda temporalmente no disponible", () => {
   );
   assert.equal(averageAvailableSignals([null, 1, 0.8]), 0.9);
 });
+
+test("prueba 25: permiso denegado se diferencia de hardware ausente", () => {
+  assert.equal(
+    resolveCapabilityStatus({
+      requiresNativeModule: false,
+      nativeModuleAvailable: true,
+      detected: true,
+      active: false,
+      permissionDenied: true,
+    }),
+    "permission-denied",
+  );
+});

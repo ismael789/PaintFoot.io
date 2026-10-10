@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import { Image } from 'expo-image';
 import * as SplashScreen from 'expo-splash-screen';
 import { useState } from 'react';
@@ -136,12 +137,12 @@ const styles = StyleSheet.create({
   },
   background: {
     borderRadius: 40,
-    experimental_backgroundImage: `linear-gradient(180deg, #3C9FFE, #0274DF)`,
+    experimental_backgroundImage: `linear-gradient(180deg, ${Palette.sky400}, ${Palette.navy500})`,
     position: 'absolute',
   },
   splashOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: '#208AEF',
+    backgroundColor: Palette.sky500,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 1000,

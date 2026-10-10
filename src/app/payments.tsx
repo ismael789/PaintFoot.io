@@ -1,10 +1,11 @@
+import { Palette } from "@/constants/palette";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { TerritoryShieldPanel } from "@/components/territory-shield-panel";
-import { getOrCreatePlayerProfile } from "@/services/player-profile";
+import { getActivePlayerId, getOrCreatePlayerProfile } from "@/services/player-profile";
 import {
   getStoredTerritories,
   subscribeToStoredTerritories,
@@ -23,7 +24,7 @@ export default function PaymentsScreen() {
       void Promise.all([getOrCreatePlayerProfile(), getStoredTerritories()]).then(
         ([profile, storedTerritories]) => {
           if (!mounted) return;
-          setPlayerId(profile.id);
+          setPlayerId(getActivePlayerId(profile));
           setTerritories(storedTerritories);
         },
       );
@@ -82,7 +83,7 @@ export default function PaymentsScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#101426" },
+  screen: { flex: 1, backgroundColor: Palette.navy900 },
   content: {
     width: "100%",
     maxWidth: 720,
@@ -91,10 +92,10 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   header: { gap: 4 },
-  title: { color: "#FFFFFF", fontSize: 24, fontWeight: "800" },
-  subtitle: { color: "#AAB2CF", fontSize: 13 },
+  title: { color: Palette.white, fontSize: 24, fontWeight: "800" },
+  subtitle: { color: Palette.textSecondary, fontSize: 13 },
   securityText: {
-    color: "#7982A2",
+    color: Palette.textMuted,
     fontSize: 11,
     lineHeight: 17,
     textAlign: "center",

@@ -3,7 +3,8 @@ export type CapabilityDisplayStatus =
   | "active"
   | "unavailable"
   | "temporarily-unavailable"
-  | "apk-only";
+  | "apk-only"
+  | "permission-denied";
 
 export function resolveCapabilityStatus({
   requiresNativeModule,
@@ -11,14 +12,17 @@ export function resolveCapabilityStatus({
   detected,
   active,
   temporarilyUnavailable = false,
+  permissionDenied = false,
 }: {
   requiresNativeModule: boolean;
   nativeModuleAvailable: boolean;
   detected: boolean | null;
   active: boolean;
   temporarilyUnavailable?: boolean;
+  permissionDenied?: boolean;
 }): CapabilityDisplayStatus {
   if (requiresNativeModule && !nativeModuleAvailable) return "apk-only";
+  if (permissionDenied) return "permission-denied";
   if (temporarilyUnavailable) return "temporarily-unavailable";
   if (detected === false) return "unavailable";
   return active ? "active" : "available";

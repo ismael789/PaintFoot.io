@@ -111,6 +111,42 @@ function createAuthStore() {
         .eq("token_hash", tokenHash);
       if (error) throw error;
     },
+    async savePushToken(userId, value) {
+      const { error: reassignmentError } = await client
+        .from("push_tokens")
+        .delete()
+        .eq("expo_push_token", value.expoPushToken)
+        .neq("user_id", userId);
+      if (reassignmentError) throw reassignmentError;
+      const { error } = await client.from("push_tokens").upsert({
+        user_id: userId,
+        expo_push_token: value.expoPushToken,
+        device_id: value.deviceId,
+        platform: value.platform,
+        enabled: true,
+        last_seen_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id,device_id" });
+      if (error) throw error;
+    },
+    async saveNotificationPreferences(userId, preferences) {
+      const { error } = await client.from("notification_preferences").upsert({
+        user_id: userId,
+        ...preferences,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+      if (error) throw error;
+    },
+    async saveNotificationLog(userId, value) {
+      const { error } = await client.from("notification_log").upsert({
+        user_id: userId,
+        event_key: value.eventKey,
+        category: value.category,
+        title: value.title,
+        sent_at: new Date().toISOString(),
+      }, { onConflict: "user_id,event_key", ignoreDuplicates: true });
+      if (error) throw error;
+    },
   };
 }
 
@@ -182,6 +218,50 @@ function startCustomAuthServer(port = Number(process.env.AUTH_PORT || DEFAULT_AU
         const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
         if (token) await store.removeSession(tokenHash(token));
         return json(response, 200, { ok: true });
+      }
+      if (request.method === "POST" && url.pathname.startsWith("/api/auth/push/")) {
+        const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+        const session = token ? await store.getSession(tokenHash(token)) : null;
+        if (!session?.user_id) return json(response, 401, { error: "Sesión no válida." });
+        const body = await readBody(request);
+        if (url.pathname === "/api/auth/push/register") {
+          if (
+            typeof body.expo_push_token !== "string" ||
+            !/^(Expo|Exponent)PushToken\[[^\]]+\]$/.test(body.expo_push_token) ||
+            typeof body.device_id !== "string" || body.device_id.length > 120 ||
+            !["android", "ios"].includes(body.platform)
+          ) return json(response, 400, { error: "Token de notificaciones no válido." });
+          await store.savePushToken(session.user_id, {
+            expoPushToken: body.expo_push_token,
+            deviceId: body.device_id,
+            platform: body.platform,
+          });
+          return json(response, 200, { ok: true });
+        }
+        if (url.pathname === "/api/auth/push/preferences") {
+          const preferences = {};
+          for (const category of ["shields", "territories", "coins", "sync", "world", "payments"]) {
+            if (typeof body[category] !== "boolean") {
+              return json(response, 400, { error: "Preferencias no válidas." });
+            }
+            preferences[category] = body[category];
+          }
+          await store.saveNotificationPreferences(session.user_id, preferences);
+          return json(response, 200, { ok: true });
+        }
+        if (url.pathname === "/api/auth/push/log") {
+          if (
+            typeof body.event_key !== "string" || body.event_key.length > 240 ||
+            !["shields", "territories", "coins", "sync", "world", "payments"].includes(body.category) ||
+            typeof body.title !== "string" || body.title.length > 120
+          ) return json(response, 400, { error: "Evento de notificación no válido." });
+          await store.saveNotificationLog(session.user_id, {
+            eventKey: body.event_key,
+            category: body.category,
+            title: body.title,
+          });
+          return json(response, 200, { ok: true });
+        }
       }
       return json(response, 404, { error: "Ruta no encontrada." });
     } catch (error) {

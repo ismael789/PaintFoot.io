@@ -1,3 +1,5 @@
+import { Palette } from "@/constants/palette";
+import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
@@ -17,7 +19,11 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { scheduleShieldNotifications } from "@/services/push-notifications";
+import {
+  scheduleFreeShieldAvailableNotification,
+  scheduleShieldNotifications,
+  sendLocalGameNotification,
+} from "@/services/push-notifications";
 import {
   getShieldPurchaseHistory,
   saveShieldPurchaseRecord,
@@ -44,6 +50,7 @@ import {
   getPlayerShieldIndicator,
   shouldOpenShieldOptions,
 } from "@/services/territory-shields";
+import { SHIELD_PRICE_CENTS_MXN } from "@/config/territory";
 import type { Territory, TerritoryShield } from "@/types/game";
 import { showFeedback } from "@/services/global-feedback";
 import { authenticateShieldPurchase } from "@/services/biometric-auth";
@@ -94,12 +101,14 @@ const PURCHASE_STATUS_LABELS = {
   canceled: "Pago cancelado",
 } as const;
 
-const PROTECTION_ACTION_COLOR = "#635BFF";
+const PROTECTION_ACTION_COLOR = Palette.navy500;
 const DEFAULT_SHIELD_PRODUCTS: ShieldProduct[] = ([1, 6, 12, 24, 36] as const).map(
   (durationHours) => ({
     id: `shield_${durationHours}h`,
     duration_hours: durationHours,
-    configured: false,
+    configured: true,
+    currency: "mxn",
+    unit_amount: SHIELD_PRICE_CENTS_MXN[durationHours],
   }),
 );
 
@@ -111,10 +120,20 @@ function formatPrice(product: ShieldProduct) {
   if (product.unit_amount == null || !product.currency) {
     return "Ver precio al continuar";
   }
+  const amount = product.unit_amount / 100;
+  const formatted = new Intl.NumberFormat("es-MX", {
+    minimumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+  return `$${formatted} ${product.currency.toUpperCase()}`;
+}
+
+function formatStoredPrice(amount: number | null, currency: string | null) {
+  if (amount == null || !currency) return "Importe no disponible";
   return new Intl.NumberFormat("es-MX", {
     style: "currency",
-    currency: product.currency.toUpperCase(),
-  }).format(product.unit_amount / 100);
+    currency: currency.toUpperCase(),
+  }).format(amount / 100);
 }
 
 interface Props {
@@ -146,7 +165,6 @@ export function TerritoryShieldPanel({
     () => territories.filter((territory) => territory.playerId === playerId),
     [playerId, territories],
   );
-  const hasOwnedTerritory = ownedTerritories.length > 0;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [optionsVisible, setOptionsVisible] = useState(false);
@@ -222,6 +240,9 @@ export function TerritoryShieldPanel({
         if (mounted) {
           setFreeAvailableAt(status.free_available_at);
           setPurchasedShields(status.purchased_shields ?? []);
+          for (const record of status.purchase_history ?? []) {
+            void saveShieldPurchaseRecord({ ...record, playerId });
+          }
         }
       })
       .catch(() => {
@@ -258,6 +279,14 @@ export function TerritoryShieldPanel({
         type: "warning",
         message: "Escudo agotado",
       });
+      void sendLocalGameNotification({
+        category: "shields",
+        eventKey: `shield_expired:${selected.id}:${selected.shield.expiresAt}`,
+        title: "Escudo agotado",
+        body: "Tu territorio ya no está protegido.",
+        url: "paintfoot://shield",
+        territoryId: selected.id,
+      });
     }
     onShieldUpdated(selected.id, null);
   }, [onShieldUpdated, selected, selectedRemainingMs]);
@@ -270,6 +299,14 @@ export function TerritoryShieldPanel({
       id: "shield-lifecycle",
       type: "warning",
       message: "Escudo por expirar",
+    });
+    void sendLocalGameNotification({
+      category: "shields",
+      eventKey: `shield_warning:${indicator.activeTerritory.id}:${indicator.activeTerritory.shield?.expiresAt ?? 0}`,
+      title: "Escudo por agotarse",
+      body: "Tu protección está por terminar.",
+      url: "paintfoot://shield",
+      territoryId: indicator.activeTerritory.id,
     });
   }, [indicator.activeTerritory, indicator.state]);
 
@@ -287,7 +324,11 @@ export function TerritoryShieldPanel({
       ]);
       setProducts(nextProducts);
       setFreeAvailableAt(playerStatus.free_available_at);
+      void scheduleFreeShieldAvailableNotification(playerStatus.free_available_at);
       setPurchasedShields(playerStatus.purchased_shields ?? []);
+      for (const record of playerStatus.purchase_history ?? []) {
+        void saveShieldPurchaseRecord({ ...record, playerId });
+      }
       if (
         selected &&
         territoryStatus?.shield &&
@@ -341,6 +382,15 @@ export function TerritoryShieldPanel({
       if (!selected) return;
       onShieldUpdated(selected.id, shield);
       void scheduleShieldNotifications(selected.id, shield.startedAt, shield.expiresAt);
+      void sendLocalGameNotification({
+        category: "shields",
+        eventKey: `shield_activated:${selected.id}:${shield.expiresAt}`,
+        title: "Escudo activado",
+        body: "Tu territorio ahora está protegido.",
+        url: "paintfoot://shield",
+        territoryId: selected.id,
+        kind: "shield-activated",
+      });
     },
     [onShieldUpdated, selected],
   );
@@ -446,8 +496,8 @@ export function TerritoryShieldPanel({
       paymentInProgressRef.current = true;
       Alert.alert(
         "Confirmar protección",
-        territoryId
-          ? `Territorio: ${territoryId}\nDuración: ${product.duration_hours} h\nPrecio: ${formatPrice(product)}\n\nLa protección comenzará después de confirmar el pago.`
+        selected
+          ? `Duración: ${product.duration_hours} h\nPrecio: ${formatPrice(product)}\n\nEl escudo quedará guardado en tu inventario para que decidas cuándo activarlo.`
           : `Duración: ${product.duration_hours} h\nPrecio: ${formatPrice(product)}\n\nEl escudo quedará guardado para activarlo cuando conquistes un territorio.`,
         [
           {
@@ -514,6 +564,7 @@ export function TerritoryShieldPanel({
                     territoryId,
                     playerId,
                     purchaseReference,
+                    returnUrl: Linking.createURL("/payments"),
                   });
                   purchaseRecord = {
                     ...purchaseRecord,
@@ -526,11 +577,16 @@ export function TerritoryShieldPanel({
                     type: "info",
                     message: "Abriendo pago seguro",
                   });
-                  const browserResult = await WebBrowser.openBrowserAsync(session.url, {
-                    showTitle: true,
-                    toolbarColor: "#101426",
-                    controlsColor: "#FFFFFF",
-                  });
+                  const returnUrl = Linking.createURL("/payments");
+                  const browserResult = await WebBrowser.openAuthSessionAsync(
+                    session.url,
+                    returnUrl,
+                    {
+                      showTitle: true,
+                      toolbarColor: Palette.navy900,
+                      controlsColor: Palette.white,
+                    },
+                  );
                   browserCanceled =
                     browserResult.type === "cancel" ||
                     browserResult.type === "dismiss";
@@ -556,6 +612,16 @@ export function TerritoryShieldPanel({
                         ? "Pago cancelado"
                         : "No se pudo completar el pago",
                     });
+                    if (browserCanceled || verified.status === "expired") {
+                      void sendLocalGameNotification({
+                        category: "payments",
+                        eventKey: `payment_canceled:${session.session_id}`,
+                        title: "Pago cancelado",
+                        body: "No se realizó ningún cobro.",
+                        url: "paintfoot://payments",
+                        kind: "payment-canceled",
+                      });
+                    }
                     return;
                   }
                   const confirmed = await confirmShieldCheckout(session.session_id, territoryId, playerId);
@@ -568,16 +634,21 @@ export function TerritoryShieldPanel({
                       confirmed.purchased_shield!,
                     ]);
                   }
-                  purchaseRecord = { ...purchaseRecord, status: "approved" };
+                  purchaseRecord = {
+                    ...purchaseRecord,
+                    amount: verified.amount_total ?? purchaseRecord.amount,
+                    currency: verified.currency ?? purchaseRecord.currency,
+                    status: "approved",
+                  };
                   await saveShieldPurchaseRecord(purchaseRecord);
                   showFeedback({
                     id: "payment-status",
                     type: "success",
                     message: "Pago aprobado",
                   });
-                  setMessage(territoryId
-                    ? `✓ Protección activada.\nTerritorio: ${territoryId}\nDuración: ${product.duration_hours} horas.`
-                    : `✓ Escudo comprado y guardado.\nDuración: ${product.duration_hours} horas.`);
+                  setMessage(
+                    `✓ Escudo comprado y guardado.\nDuración: ${product.duration_hours} horas.\nPrecio: ${formatStoredPrice(purchaseRecord.amount, purchaseRecord.currency)}.`,
+                  );
                 } catch (error) {
                   await saveShieldPurchaseRecord({
                     ...purchaseRecord,
@@ -615,6 +686,9 @@ export function TerritoryShieldPanel({
           <View style={styles.purchasedShieldText}>
             <Text style={styles.productHours}>Escudo {purchasedShield.durationHours} horas</Text>
             <Text style={styles.productProvider}>
+              Valor: {formatStoredPrice(purchasedShield.amount, purchasedShield.currency)}
+            </Text>
+            <Text style={styles.productProvider}>
               {selected ? `Listo para ${selected.id}` : "Guardado hasta conquistar un territorio"}
             </Text>
           </View>
@@ -625,7 +699,7 @@ export function TerritoryShieldPanel({
             accessibilityRole="button"
           >
             {busy === purchasedShield.id
-              ? <ActivityIndicator color="#FFFFFF" />
+              ? <ActivityIndicator color={Palette.white} />
               : <Text style={styles.productActionText}>
                   {selected ? "ACTIVAR" : "GUARDADO"}
                 </Text>}
@@ -790,7 +864,7 @@ export function TerritoryShieldPanel({
         escudo, confirmas la compra y decides cuándo activarlo.
       </Text>
       <ScrollView style={styles.products} nestedScrollEnabled>
-        {loadingProducts && <ActivityIndicator color="#4DD0E1" />}
+        {loadingProducts && <ActivityIndicator color={Palette.sky400} />}
         {products.map((product) => (
           <Pressable
             key={product.id}
@@ -816,7 +890,7 @@ export function TerritoryShieldPanel({
               <Text style={product.unit_amount == null ? styles.notConfigured : styles.productPrice}>{formatPrice(product)}</Text>
               <View style={styles.productActionButton}>
                 {busy === product.id
-                  ? <ActivityIndicator color="#FFFFFF" />
+                  ? <ActivityIndicator color={Palette.white} />
                   : <Text style={styles.productActionText}>
                       COMPRAR
                     </Text>}
@@ -838,28 +912,10 @@ export function TerritoryShieldPanel({
     return (
       <View style={styles.inlinePanel}>
         <Text style={styles.inlineTitle}>Protección de territorios</Text>
-        {hasOwnedTerritory ? (
-          optionsContent
-        ) : (
-          <View style={styles.shieldLockedCard}>
-            <Image
-              source={SHIELD_ASSETS.available}
-              style={styles.lockedShieldImage}
-              contentFit="contain"
-              autoplay
-            />
-            <Text style={styles.shieldLockedTitle}>Escudos bloqueados</Text>
-            <Text style={styles.shieldLockedText}>
-              Conquista tu primer territorio para conocer los estados del escudo,
-              recibir el escudo gratuito y habilitar la compra y activación manual.
-            </Text>
-          </View>
-        )}
+        {optionsContent}
       </View>
     );
   }
-
-  if (!hasOwnedTerritory) return null;
 
   return (
     <>
@@ -869,8 +925,8 @@ export function TerritoryShieldPanel({
           {
             top: Math.max(104, insets.top + 78),
             backgroundColor: lightTheme
-              ? "rgba(255,255,255,0.94)"
-              : "rgba(10,18,42,0.94)",
+              ? Palette.overlayLight
+              : Palette.overlayNavy,
           },
         ]}
         onPress={() => setMapMenuVisible(true)}
@@ -947,7 +1003,7 @@ export function TerritoryShieldPanel({
               <SymbolView
                 name={{ ios: "shield.fill", android: "shield" }}
                 size={34}
-                tintColor={lightTheme ? "#17213B" : "#83DFFF"}
+                tintColor={lightTheme ? Palette.navy800 : Palette.sky200}
               />
               <Text style={[styles.mapMenuOptionTitle, lightTheme && styles.mapMenuTextLight]}>Escudo</Text>
             </Pressable>
@@ -963,7 +1019,7 @@ export function TerritoryShieldPanel({
               <SymbolView
                 name={{ ios: "creditcard.fill", android: "payments" }}
                 size={34}
-                tintColor={lightTheme ? "#17213B" : "#83DFFF"}
+                tintColor={lightTheme ? Palette.navy800 : Palette.sky200}
               />
               <Text style={[styles.mapMenuOptionTitle, lightTheme && styles.mapMenuTextLight]}>
                 Comprar escudos
@@ -982,7 +1038,7 @@ export function TerritoryShieldPanel({
               <SymbolView
                 name={{ ios: "shippingbox.fill", android: "inventory_2" }}
                 size={34}
-                tintColor={lightTheme ? "#17213B" : "#83DFFF"}
+                tintColor={lightTheme ? Palette.navy800 : Palette.sky200}
               />
               <Text style={[styles.mapMenuOptionTitle, lightTheme && styles.mapMenuTextLight]}>
                 Inventario ({purchasedShields.length})
@@ -1000,7 +1056,7 @@ export function TerritoryShieldPanel({
               <SymbolView
                 name={{ ios: "clock.arrow.circlepath", android: "history" }}
                 size={34}
-                tintColor={lightTheme ? "#17213B" : "#83DFFF"}
+                tintColor={lightTheme ? Palette.navy800 : Palette.sky200}
               />
               <Text style={[styles.mapMenuOptionTitle, lightTheme && styles.mapMenuTextLight]}>
                 Historial
@@ -1192,95 +1248,95 @@ export function TerritoryShieldPanel({
 }
 
 const styles = StyleSheet.create({
-  inlinePanel: { backgroundColor: "#1A1A2E", borderRadius: 18, padding: 16, gap: 12 },
-  inlineTitle: { color: "#FFFFFF", fontSize: 20, fontWeight: "900" },
-  currentProtectionCard: { backgroundColor: "#202744", borderRadius: 15, padding: 12, flexDirection: "row", alignItems: "center", gap: 12 },
+  inlinePanel: { backgroundColor: Palette.navy900, borderRadius: 18, padding: 16, gap: 12 },
+  inlineTitle: { color: Palette.white, fontSize: 20, fontWeight: "900" },
+  currentProtectionCard: { backgroundColor: Palette.navy800, borderRadius: 15, padding: 12, flexDirection: "row", alignItems: "center", gap: 12 },
   currentProtectionCardCompact: { alignItems: "flex-start", flexDirection: "column" },
   currentProtectionImage: { width: 72, height: 72 },
   currentProtectionText: { flex: 1, gap: 3 },
-  currentProtectionTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "900" },
-  currentProtectionDetail: { color: "#C5CAE9", fontSize: 11, lineHeight: 16 },
+  currentProtectionTitle: { color: Palette.white, fontSize: 16, fontWeight: "900" },
+  currentProtectionDetail: { color: Palette.textSoft, fontSize: 11, lineHeight: 16 },
   mapBadge: { position: "absolute", left: 0, width: 136, height: 136, alignItems: "center", justifyContent: "center" },
   badgeImage: { width: 128, height: 128 },
   mapMenuButton: { position: "absolute", right: 16, width: 52, height: 52, borderRadius: 16, alignItems: "center", justifyContent: "center", elevation: 9 },
   hamburgerIcon: { width: 24, gap: 5 },
-  hamburgerLine: { width: 24, height: 3, borderRadius: 2, backgroundColor: "#FFFFFF" },
-  hamburgerLineLight: { backgroundColor: "#17213B" },
-  mapMenuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.3)", alignItems: "flex-end", paddingRight: 16 },
-  mapMenuCard: { borderRadius: 17, backgroundColor: "#151B31", borderWidth: 1, borderColor: "#35405F", elevation: 12 },
+  hamburgerLine: { width: 24, height: 3, borderRadius: 2, backgroundColor: Palette.white },
+  hamburgerLineLight: { backgroundColor: Palette.navy800 },
+  mapMenuBackdrop: { flex: 1, backgroundColor: Palette.overlayBackdropSoft, alignItems: "flex-end", paddingRight: 16 },
+  mapMenuCard: { borderRadius: 17, backgroundColor: Palette.navy900, borderWidth: 1, borderColor: Palette.navy700, elevation: 12 },
   mapMenuCardContent: { padding: 13, gap: 10 },
-  mapMenuCardLight: { backgroundColor: "#FFFFFF", borderColor: "#C8D0E3" },
+  mapMenuCardLight: { backgroundColor: Palette.white, borderColor: Palette.ice200 },
   mapMenuHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  mapMenuTitle: { color: "#AAB2CF", fontSize: 11, fontWeight: "900", letterSpacing: 1.2 },
-  mapMenuClose: { color: "#208AEF", fontSize: 12, fontWeight: "900" },
-  mapMenuOption: { minHeight: 72, borderRadius: 13, paddingHorizontal: 10, paddingVertical: 8, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#222A48" },
-  mapMenuOptionLight: { backgroundColor: "#EEF3FC" },
-  mapMenuTextLight: { color: "#17213B" },
-  mapMenuOptionTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "900", flex: 1 },
-  shieldGuideBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.72)", justifyContent: "flex-end" },
-  shieldGuideCard: { maxHeight: "88%", backgroundColor: "#101426", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, gap: 14 },
-  shieldGuideCardLight: { backgroundColor: "#F7F9FE" },
-  shieldGuideTitle: { color: "#FFFFFF", fontSize: 21, fontWeight: "900" },
+  mapMenuTitle: { color: Palette.textSecondary, fontSize: 11, fontWeight: "900", letterSpacing: 1.2 },
+  mapMenuClose: { color: Palette.sky500, fontSize: 12, fontWeight: "900" },
+  mapMenuOption: { minHeight: 72, borderRadius: 13, paddingHorizontal: 10, paddingVertical: 8, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: Palette.navy700 },
+  mapMenuOptionLight: { backgroundColor: Palette.ice100 },
+  mapMenuTextLight: { color: Palette.navy800 },
+  mapMenuOptionTitle: { color: Palette.white, fontSize: 16, fontWeight: "900", flex: 1 },
+  shieldGuideBackdrop: { flex: 1, backgroundColor: Palette.overlayBackdrop, justifyContent: "flex-end" },
+  shieldGuideCard: { maxHeight: "88%", backgroundColor: Palette.navy900, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, gap: 14 },
+  shieldGuideCardLight: { backgroundColor: Palette.ice50 },
+  shieldGuideTitle: { color: Palette.white, fontSize: 21, fontWeight: "900" },
   shieldGuideContent: { gap: 16, paddingBottom: 8 },
   shieldGuideGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  shieldGuideState: { width: "48%", minHeight: 182, borderRadius: 16, padding: 10, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: "#202744" },
+  shieldGuideState: { width: "48%", minHeight: 182, borderRadius: 16, padding: 10, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: Palette.navy800 },
   shieldGuideStateCompact: { width: "100%" },
-  shieldGuideStateLight: { backgroundColor: "#E8EEF9" },
+  shieldGuideStateLight: { backgroundColor: Palette.ice100 },
   shieldGuideImageFrame: { width: 140, height: 140, alignItems: "center", justifyContent: "flex-end" },
   shieldGuideImage: { width: 108, height: 108 },
   shieldGuideActiveImage: { width: 140, height: 140, transform: [{ translateY: 32 }] },
-  shieldGuideLabel: { color: "#FFFFFF", fontSize: 13, fontWeight: "900", textAlign: "center" },
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.72)", justifyContent: "flex-end" },
-  modalCard: { maxHeight: "88%", backgroundColor: "#101426", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, gap: 12 },
+  shieldGuideLabel: { color: Palette.white, fontSize: 13, fontWeight: "900", textAlign: "center" },
+  modalBackdrop: { flex: 1, backgroundColor: Palette.overlayBackdrop, justifyContent: "flex-end" },
+  modalCard: { maxHeight: "88%", backgroundColor: Palette.navy900, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, gap: 12 },
   optionsScrollContent: { gap: 12, paddingBottom: 4 },
   modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  modalTitle: { color: "#FFFFFF", fontSize: 21, fontWeight: "900" },
-  close: { color: "#83DFFF", fontSize: 14, fontWeight: "800" },
-  testMode: { color: "#8993B2", fontSize: 9, fontWeight: "700", alignSelf: "flex-end" },
-  shieldExplanation: { backgroundColor: "#202744", borderRadius: 13, padding: 13, gap: 5 },
-  shieldExplanationTitle: { color: "#72E6BE", fontSize: 14, fontWeight: "900" },
-  shieldExplanationText: { color: "#C5CAE9", fontSize: 11, lineHeight: 16 },
-  shieldLockedCard: { alignItems: "center", backgroundColor: "#202744", borderRadius: 15, padding: 18, gap: 8 },
+  modalTitle: { color: Palette.white, fontSize: 21, fontWeight: "900" },
+  close: { color: Palette.sky200, fontSize: 14, fontWeight: "800" },
+  testMode: { color: Palette.textMuted, fontSize: 9, fontWeight: "700", alignSelf: "flex-end" },
+  shieldExplanation: { backgroundColor: Palette.navy800, borderRadius: 13, padding: 13, gap: 5 },
+  shieldExplanationTitle: { color: Palette.success, fontSize: 14, fontWeight: "900" },
+  shieldExplanationText: { color: Palette.textSoft, fontSize: 11, lineHeight: 16 },
+  shieldLockedCard: { alignItems: "center", backgroundColor: Palette.navy800, borderRadius: 15, padding: 18, gap: 8 },
   lockedShieldImage: { width: 112, height: 112 },
-  shieldLockedTitle: { color: "#FFFFFF", fontSize: 17, fontWeight: "900", textAlign: "center" },
-  shieldLockedText: { color: "#C5CAE9", fontSize: 12, lineHeight: 18, textAlign: "center" },
-  sectionTitle: { color: "#C5CAE9", fontSize: 13, fontWeight: "800" },
+  shieldLockedTitle: { color: Palette.white, fontSize: 17, fontWeight: "900", textAlign: "center" },
+  shieldLockedText: { color: Palette.textSoft, fontSize: 12, lineHeight: 18, textAlign: "center" },
+  sectionTitle: { color: Palette.textSoft, fontSize: 13, fontWeight: "800" },
   territoryRow: { gap: 8 },
-  territoryChoice: { backgroundColor: "#242B4A", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9 },
-  selectedChoice: { borderColor: "#3FD8FF", borderWidth: 2 },
-  choiceText: { color: "#FFFFFF", fontSize: 12, fontWeight: "700" },
-  noTerritoryCard: { backgroundColor: "#242B4A", borderRadius: 12, padding: 13 },
-  noTerritoryTitle: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },
-  noTerritoryText: { color: "#C5CAE9", fontSize: 12, lineHeight: 18, marginTop: 4 },
-  coinShieldButton: { backgroundColor: "#B7791F", borderRadius: 14, padding: 14 },
-  purchasedShieldCard: { backgroundColor: "#252C4D", borderRadius: 13, padding: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  territoryChoice: { backgroundColor: Palette.navy800, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9 },
+  selectedChoice: { borderColor: Palette.sky400, borderWidth: 2 },
+  choiceText: { color: Palette.white, fontSize: 12, fontWeight: "700" },
+  noTerritoryCard: { backgroundColor: Palette.navy800, borderRadius: 12, padding: 13 },
+  noTerritoryTitle: { color: Palette.white, fontSize: 14, fontWeight: "900" },
+  noTerritoryText: { color: Palette.textSoft, fontSize: 12, lineHeight: 18, marginTop: 4 },
+  coinShieldButton: { backgroundColor: Palette.navy500, borderRadius: 14, padding: 14 },
+  purchasedShieldCard: { backgroundColor: Palette.navy800, borderRadius: 13, padding: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   stackedCard: { alignItems: "stretch", flexDirection: "column" },
   purchasedShieldText: { flex: 1 },
   inventoryList: { gap: 9 },
   freeButton: { backgroundColor: PROTECTION_ACTION_COLOR, borderRadius: 14, padding: 14 },
-  freeTitle: { color: "#FFFFFF", fontSize: 15, fontWeight: "900" },
-  freeSubtitle: { color: "#E8E7FF", fontSize: 12, marginTop: 4 },
-  protectionActionText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900", textAlign: "center" },
+  freeTitle: { color: Palette.white, fontSize: 15, fontWeight: "900" },
+  freeSubtitle: { color: Palette.ice100, fontSize: 12, marginTop: 4 },
+  protectionActionText: { color: Palette.white, fontSize: 12, fontWeight: "900", textAlign: "center" },
   freeActionText: { marginTop: 10 },
   goToPaymentsButton: { backgroundColor: PROTECTION_ACTION_COLOR, borderRadius: 12, minHeight: 46, alignItems: "center", justifyContent: "center", paddingHorizontal: 16 },
-  maximumNotice: { color: "#AAB2CF", fontSize: 11, marginTop: -6 },
+  maximumNotice: { color: Palette.textSecondary, fontSize: 11, marginTop: -6 },
   products: { maxHeight: 260 },
-  product: { backgroundColor: "#252C4D", borderRadius: 13, padding: 14, marginBottom: 9, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  product: { backgroundColor: Palette.navy800, borderRadius: 13, padding: 14, marginBottom: 9, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   productCompact: { alignItems: "stretch", gap: 10, flexDirection: "column" },
-  productHours: { color: "#FFFFFF", fontSize: 16, fontWeight: "900" },
-  productProvider: { color: "#8993B2", fontSize: 10, marginTop: 3 },
-  productPrice: { color: "#72E6BE", fontSize: 16, fontWeight: "900" },
-  notConfigured: { color: "#FFB4B4", fontSize: 11, fontWeight: "800" },
+  productHours: { color: Palette.white, fontSize: 16, fontWeight: "900" },
+  productProvider: { color: Palette.textMuted, fontSize: 10, marginTop: 3 },
+  productPrice: { color: Palette.success, fontSize: 16, fontWeight: "900" },
+  notConfigured: { color: Palette.dangerSoft, fontSize: 11, fontWeight: "800" },
   productActionColumn: { alignItems: "flex-end", gap: 7, marginLeft: 10 },
   productActionColumnCompact: { width: "100%", alignItems: "stretch", marginLeft: 0 },
   productActionButton: { backgroundColor: PROTECTION_ACTION_COLOR, borderRadius: 9, minHeight: 34, minWidth: 132, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
-  productActionText: { color: "#FFFFFF", fontSize: 9, fontWeight: "900", textAlign: "center" },
+  productActionText: { color: Palette.white, fontSize: 9, fontWeight: "900", textAlign: "center" },
   disabled: { opacity: 0.5 },
-  legal: { color: "#7F89AA", fontSize: 10, lineHeight: 15, textAlign: "center" },
+  legal: { color: Palette.textMuted, fontSize: 10, lineHeight: 15, textAlign: "center" },
   historySection: { gap: 9, marginTop: 4 },
-  historyCard: { backgroundColor: "#242B4A", borderRadius: 13, padding: 12, gap: 3 },
-  historyTitle: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
-  historyDetail: { color: "#C5CAE9", fontSize: 11, lineHeight: 16 },
-  historyMode: { color: "#FFCC80", fontSize: 10, fontWeight: "900", marginTop: 3 },
-  mutedHistory: { color: "#8993B2", fontSize: 12 },
+  historyCard: { backgroundColor: Palette.navy800, borderRadius: 13, padding: 12, gap: 3 },
+  historyTitle: { color: Palette.white, fontSize: 13, fontWeight: "900" },
+  historyDetail: { color: Palette.textSoft, fontSize: 11, lineHeight: 16 },
+  historyMode: { color: Palette.warning, fontSize: 10, fontWeight: "900", marginTop: 3 },
+  mutedHistory: { color: Palette.textMuted, fontSize: 12 },
 });

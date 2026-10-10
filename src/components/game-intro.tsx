@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import * as SplashScreen from "expo-splash-screen";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -121,11 +122,11 @@ export function GameIntro({ onComplete }: GameIntroProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#FFFFFF",
+    backgroundColor: Palette.white,
   },
   animation: {
     flex: 1,
-    backgroundColor: "#FFFFFF",
+    backgroundColor: Palette.white,
   },
   touchSurface: {
     ...StyleSheet.absoluteFill,
@@ -139,12 +140,12 @@ const styles = StyleSheet.create({
   },
   promptPill: {
     borderRadius: 999,
-    backgroundColor: "rgba(27, 42, 74, 0.82)",
+    backgroundColor: Palette.overlayNavyStrong,
     paddingHorizontal: 20,
     paddingVertical: 10,
   },
   promptText: {
-    color: "#FFFFFF",
+    color: Palette.white,
     fontSize: 15,
     fontWeight: "700",
     letterSpacing: 0.5,

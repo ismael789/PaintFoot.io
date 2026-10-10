@@ -143,6 +143,10 @@ test("integracion A: datos coherentes de todos los sensores dan confianza alta",
   assert.equal(analysis.headingConfidence, "high");
   assert.equal(analysis.roadConfidence, "high");
   assert.equal(analysis.captureConfidence, "high");
+  assert.equal(analysis.trackingReliability, "high");
+  assert.equal(analysis.magneticConfidence, "high");
+  assert.equal(analysis.pocketState, "not-in-pocket");
+  assert.equal(analysis.sensorAvailability.gyroscope, true);
 });
 
 test("integracion B: GPS impreciso reduce confianza sin cancelar el recorrido", () => {
@@ -355,6 +359,9 @@ test("integracion G: sin barometro el resumen y la conquista siguen disponibles"
   });
   assert.equal(summary.territoriesCaptured, 1);
   assert.equal(summary.ascentMeters, null);
+  assert.equal(summary.magneticConfidence, "high");
+  assert.equal(summary.sensorAvailability.barometer, false);
+  assert.equal(summary.pocketState, "not-in-pocket");
 });
 
 test("integracion H: la ausencia de un sensor no reserva peso ni detiene fusion", () => {

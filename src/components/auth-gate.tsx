@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -57,7 +58,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (checking) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator color="#40C4FF" size="large" />
+        <ActivityIndicator color={Palette.sky400} size="large" />
       </View>
     );
   }
@@ -83,7 +84,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               autoComplete="name"
               onChangeText={setName}
               placeholder="Nombre completo"
-              placeholderTextColor="#8390AE"
+              placeholderTextColor={Palette.textMuted}
               style={styles.input}
               value={name}
             />
@@ -92,7 +93,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               keyboardType="number-pad"
               onChangeText={setAge}
               placeholder="Edad"
-              placeholderTextColor="#8390AE"
+              placeholderTextColor={Palette.textMuted}
               style={styles.input}
               value={age}
             />
@@ -104,7 +105,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           keyboardType="email-address"
           onChangeText={setEmail}
           placeholder="Correo electrónico"
-          placeholderTextColor="#8390AE"
+          placeholderTextColor={Palette.textMuted}
           style={styles.input}
           value={email}
         />
@@ -113,7 +114,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           autoComplete="password"
           onChangeText={setPassword}
           placeholder="Contraseña (mínimo 8 caracteres)"
-          placeholderTextColor="#8390AE"
+          placeholderTextColor={Palette.textMuted}
           secureTextEntry
           style={styles.input}
           value={password}
@@ -124,7 +125,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             autoComplete="password"
             onChangeText={setPasswordConfirmation}
             placeholder="Repite la contraseña"
-            placeholderTextColor="#8390AE"
+            placeholderTextColor={Palette.textMuted}
             secureTextEntry
             style={styles.input}
             value={passwordConfirmation}
@@ -132,7 +133,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         ) : null}
         {error ? <Text style={styles.error}>{error}</Text> : null}
         <Pressable disabled={busy} onPress={() => void submit()} style={styles.primaryButton}>
-          {busy ? <ActivityIndicator color="#06111F" /> : <Text style={styles.primaryText}>{registering ? "Crear cuenta" : "Entrar"}</Text>}
+          {busy ? <ActivityIndicator color={Palette.navy950} /> : <Text style={styles.primaryText}>{registering ? "Crear cuenta" : "Entrar"}</Text>}
         </Pressable>
         <Pressable disabled={busy} onPress={() => { setRegistering((value) => !value); setError(null); }} style={styles.secondaryButton}>
           <Text style={styles.secondaryText}>
@@ -145,17 +146,17 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 }
 
 const styles = StyleSheet.create({
-  loading: { alignItems: "center", backgroundColor: "#07111F", flex: 1, justifyContent: "center" },
-  screen: { alignItems: "center", backgroundColor: "#07111F", flex: 1, justifyContent: "center", padding: 24 },
-  card: { backgroundColor: "#101D31", borderColor: "#233A59", borderRadius: 28, borderWidth: 1, maxWidth: 420, padding: 28, width: "100%" },
-  brandMark: { alignItems: "center", alignSelf: "center", backgroundColor: "#40C4FF", borderRadius: 22, height: 64, justifyContent: "center", marginBottom: 16, width: 64 },
-  brandMarkText: { color: "#06111F", fontSize: 34, fontWeight: "900" },
-  title: { color: "#F5FAFF", fontSize: 30, fontWeight: "900", textAlign: "center" },
-  subtitle: { color: "#AAB9D3", fontSize: 15, marginBottom: 24, marginTop: 8, textAlign: "center" },
-  input: { backgroundColor: "#182941", borderColor: "#2D4768", borderRadius: 14, borderWidth: 1, color: "#FFFFFF", fontSize: 16, marginBottom: 12, paddingHorizontal: 16, paddingVertical: 14 },
-  error: { color: "#FF9B9B", fontSize: 14, marginBottom: 12 },
-  primaryButton: { alignItems: "center", backgroundColor: "#40C4FF", borderRadius: 14, minHeight: 52, justifyContent: "center", marginTop: 4 },
-  primaryText: { color: "#06111F", fontSize: 16, fontWeight: "900" },
+  loading: { alignItems: "center", backgroundColor: Palette.navy950, flex: 1, justifyContent: "center" },
+  screen: { alignItems: "center", backgroundColor: Palette.navy950, flex: 1, justifyContent: "center", padding: 24 },
+  card: { backgroundColor: Palette.navy800, borderColor: Palette.navy700, borderRadius: 28, borderWidth: 1, maxWidth: 420, padding: 28, width: "100%" },
+  brandMark: { alignItems: "center", alignSelf: "center", backgroundColor: Palette.sky400, borderRadius: 22, height: 64, justifyContent: "center", marginBottom: 16, width: 64 },
+  brandMarkText: { color: Palette.navy950, fontSize: 34, fontWeight: "900" },
+  title: { color: Palette.ice50, fontSize: 30, fontWeight: "900", textAlign: "center" },
+  subtitle: { color: Palette.textSecondary, fontSize: 15, marginBottom: 24, marginTop: 8, textAlign: "center" },
+  input: { backgroundColor: Palette.navy800, borderColor: Palette.navy700, borderRadius: 14, borderWidth: 1, color: Palette.white, fontSize: 16, marginBottom: 12, paddingHorizontal: 16, paddingVertical: 14 },
+  error: { color: Palette.dangerSoft, fontSize: 14, marginBottom: 12 },
+  primaryButton: { alignItems: "center", backgroundColor: Palette.sky400, borderRadius: 14, minHeight: 52, justifyContent: "center", marginTop: 4 },
+  primaryText: { color: Palette.navy950, fontSize: 16, fontWeight: "900" },
   secondaryButton: { alignItems: "center", padding: 16 },
-  secondaryText: { color: "#8EDCFF", fontSize: 14, fontWeight: "700" },
+  secondaryText: { color: Palette.sky200, fontSize: 14, fontWeight: "700" },
 });

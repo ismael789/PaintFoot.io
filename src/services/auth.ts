@@ -97,6 +97,27 @@ async function requestAuth(
   return body.session;
 }
 
+export async function requestAuthenticatedPaintFootApi<T>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  const baseUrl = await resolveAuthApiUrl();
+  const session = await getPersistedAuthSession();
+  if (!session) throw new Error("Inicia sesión para sincronizar esta configuración.");
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json().catch(() => ({})) as T & { error?: string };
+  if (!response.ok) throw new Error(result.error ?? "No fue posible sincronizar los datos.");
+  return result;
+}
+
 export async function registerWithEmail(
   name: string,
   age: string,

@@ -1,6 +1,7 @@
+import { Palette } from "@/constants/palette";
 import Constants from "expo-constants";
 import NetInfo from "@react-native-community/netinfo";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useLocalSearchParams } from "expo-router";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -38,6 +39,7 @@ import {
 } from "@/services/android-intents";
 import {
   registerForRemotePushNotifications,
+  sendLocalGameNotification,
 } from "@/services/push-notifications";
 import {
   buildRoadGraph,
@@ -58,6 +60,7 @@ import {
   getTrackingSessionById,
   isActiveOfflineSessionStatus,
   resolvePendingTerritory,
+  saveRoadSegmentsToCache,
   savePendingTerritory,
   saveTrustedServerTime,
   setActiveTrackingCacheCoverage,
@@ -78,6 +81,7 @@ import {
   createTrackingSessionSummary,
   shouldAcceptRoadTransition,
 } from "@/services/sensor-fusion";
+import { shouldAcceptStableGpsUpdate } from "@/services/location-stability";
 import {
   getLatestTrackingSession,
   getThemePreference,
@@ -92,7 +96,10 @@ import {
 } from "@/services/player-profile";
 import {
   collectCoin,
+  filterUncollectedCoins,
   getCoinBalance,
+  getStoredWorldCoinCatalogNear,
+  saveWorldCoinCatalog,
   type MapCoin,
 } from "@/services/coins";
 import { getPersistedAuthSession } from "@/services/auth";
@@ -114,7 +121,6 @@ import {
   ROAD_MATCHING_RULES,
   TRACKING_RULES,
 } from "@/config/territory";
-import { closestPointOnSegment } from "@/utils/geo";
 import type {
   GeoCoordinate,
   PlayerProfile,
@@ -129,7 +135,7 @@ import type {
 
 function contrastingMapColor(color: string) {
   const match = /^#([0-9a-f]{6})$/i.exec(color);
-  if (!match) return "#F25F5C";
+  if (!match) return Palette.danger;
   const value = Number.parseInt(match[1], 16);
   const red = 255 - ((value >> 16) & 0xff);
   const green = 255 - ((value >> 8) & 0xff);
@@ -139,64 +145,23 @@ function contrastingMapColor(color: string) {
     .join("")}`;
 }
 
-function centerCoinOnNearestRoad(
-  coordinate: Coordinate,
-  segments: RoadSegment[],
-): Coordinate {
-  let nearest: { coordinate: Coordinate; distanceMeters: number } | null = null;
-  for (const segment of segments) {
-    for (let index = 1; index < segment.coordinates.length; index += 1) {
-      const projected = closestPointOnSegment(
-        coordinate,
-        segment.coordinates[index - 1],
-        segment.coordinates[index],
-      );
-      if (!nearest || projected.distanceMeters < nearest.distanceMeters) {
-        nearest = {
-          coordinate: {
-            latitude: projected.coordinate.latitude,
-            longitude: projected.coordinate.longitude,
-          },
-          distanceMeters: projected.distanceMeters,
-        };
-      }
-
-    }
-  }
-  return nearest && nearest.distanceMeters <= 80
-    ? { ...coordinate, ...nearest.coordinate }
-    : coordinate;
-}
-
-function createStreetCoins(
-  location: Coordinate,
-  segments: RoadSegment[],
-): MapCoin[] {
-  const candidates = segments
-    .flatMap((segment) => segment.coordinates)
-    .filter((point) => distanceInMeters(point, location) <= 500)
-    .filter(
-      (point, index, points) =>
-        points.findIndex((other) => distanceInMeters(other, point) < 8) ===
-        index,
-    )
-    .sort(
-      (first, second) =>
-        distanceInMeters(first, location) - distanceInMeters(second, location),
-    )
-    .slice(0, 80);
-  return candidates.map((point, index) => ({
-    id: `street-${Date.now()}-${index}`,
-    latitude: point.latitude,
-    longitude: point.longitude,
-    value: 1,
-    availableAt: Date.now() + 15_000,
-  }));
-}
 import { debugLog } from "@/utils/debug-log";
 import { distanceInMeters } from "@/utils/geo";
 import { MAP_HTML } from "@/services/map-html";
-import { prefetchRoadRegionsNear } from "@/services/regional-road-cache";
+import {
+  fetchRoadNetworkForBounds,
+  getBundledSanLuisRioColoradoRoadSegmentsNear,
+  isInsideSanLuisRioColoradoUrbanArea,
+  prefetchRoadRegionsNear,
+} from "@/services/regional-road-cache";
+import {
+  COIN_ACTIVE_MEMORY_LIMIT,
+  COIN_LOAD_RADIUS_METERS,
+  COIN_UNLOAD_RADIUS_METERS,
+  createRegionalStreetCoins,
+  WORLD_COIN_MINIMUM_NEARBY_VISIBLE,
+  WORLD_COIN_NEARBY_REFRESH_CELL_DEGREES,
+} from "@/services/world-coins";
 import {
   confirmGlobalTerritoryCapture,
   GlobalMultiplayerController,
@@ -218,9 +183,10 @@ import {
 } from "@/services/game-system-status";
 
 // ─── Trail Config ────────────────────────────────────────────────
-const TRAIL_COLOR = "#FF4444";
+const TRAIL_COLOR = Palette.danger;
 const TRAIL_STROKE_WIDTH = 5;
 const IS_EXPO_GO = Constants.expoGoConfig !== null;
+const DEBUG_COINS = __DEV__ || process.env.EXPO_PUBLIC_DEBUG_COINS === "true";
 
 // ─── GPS Config ──────────────────────────────────────────────────
 // Seguimiento moderado para mantener visible al jugador en el modo multijugador.
@@ -356,6 +322,9 @@ async function matchCompletePendingTrack(rawTrack: RawTrackPoint[]) {
 
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
+  const { territoryId: requestedTerritoryId } = useLocalSearchParams<{
+    territoryId?: string;
+  }>();
   const { height, fontScale } = useWindowDimensions();
   const compactLayout = height < 700 || fontScale > 1.15;
   // ─── State ───────────────────────────────────────────────────
@@ -401,6 +370,8 @@ export default function MapScreen() {
     useState<MultiplayerPreferences>(DEFAULT_MULTIPLAYER_PREFERENCES);
   const [coinBalance, setCoinBalance] = useState(0);
   const [activeCoins, setActiveCoins] = useState<MapCoin[]>([]);
+  const [coinViewportCenter, setCoinViewportCenter] =
+    useState<Coordinate | null>(null);
   const [worldStatus, setWorldStatus] =
     useState<GlobalWorldStatus>("local");
   const myPlayerId = getActivePlayerId(playerProfile);
@@ -439,39 +410,12 @@ export default function MapScreen() {
   const globalTerritoriesLoadedRef = useRef(false);
   const nearbyPlayerCountRef = useRef(0);
   const activeCoinsRef = useRef<MapCoin[]>([]);
-  const lastCoinCoordinateRef = useRef<Coordinate | null>(null);
-  const coinRespawnTimersRef = useRef(
-    new Map<string, ReturnType<typeof setTimeout>>(),
-  );
-  const initialCoinsSeededRef = useRef(false);
+  const coinFallbackRegionRef = useRef<string | null>(null);
+  const coinViewportCenterRef = useRef<Coordinate | null>(null);
   const mapPerspectiveRef = useRef({
     playerId: myPlayerId,
     playerColor: playerProfile.color,
   });
-
-  const scheduleCoinRespawn = useCallback((coin: MapCoin) => {
-    const existingTimer = coinRespawnTimersRef.current.get(coin.id);
-    if (existingTimer) clearTimeout(existingTimer);
-    const timer = setTimeout(() => {
-      coinRespawnTimersRef.current.delete(coin.id);
-      const respawnedCoin: MapCoin = {
-        ...coin,
-        id: `${coin.id}-respawn-${Date.now()}`,
-        availableAt: Date.now(),
-      };
-      activeCoinsRef.current = [...activeCoinsRef.current, respawnedCoin];
-      setActiveCoins(activeCoinsRef.current);
-    }, 10 * 60 * 1000);
-    coinRespawnTimersRef.current.set(coin.id, timer);
-  }, []);
-
-  useEffect(
-    () => () => {
-      coinRespawnTimersRef.current.forEach((timer) => clearTimeout(timer));
-      coinRespawnTimersRef.current.clear();
-    },
-    [],
-  );
 
   useEffect(() => {
     isTrackingRef.current = isTracking;
@@ -491,47 +435,140 @@ export default function MapScreen() {
     );
   }, [activeCoins, mapStatus]);
 
+  // Las monedas cercanas pertenecen a la ubicacion real del jugador. El centro
+  // del viewport solo sirve como respaldo antes de recibir la primera lectura
+  // GPS y nunca debe cambiar el catalogo personal al desplazar el mapa.
+  const effectiveCoinCenter = location ?? coinViewportCenter;
+  const currentCoinRegionId = effectiveCoinCenter
+    ? coordinateRegionId(effectiveCoinCenter)
+    : null;
+  const currentCoinProximityId = effectiveCoinCenter
+    ? `${Math.floor((effectiveCoinCenter.latitude + 90) / WORLD_COIN_NEARBY_REFRESH_CELL_DEGREES)}_${Math.floor((effectiveCoinCenter.longitude + 180) / WORLD_COIN_NEARBY_REFRESH_CELL_DEGREES)}`
+    : null;
+
   useEffect(() => {
-    if (!location || initialCoinsSeededRef.current) return;
-    initialCoinsSeededRef.current = true;
+    if (!location || !currentCoinProximityId) return;
+    const hasNearbyCoins = activeCoins.some(
+      (coin) =>
+        (!coin.availableAt || Date.now() >= coin.availableAt) &&
+        distanceInMeters(location, coin) <= 120,
+    );
+    if (!hasNearbyCoins) return;
+    void sendLocalGameNotification({
+      category: "coins",
+      eventKey: `coins_nearby:${currentCoinProximityId}`,
+      title: "Monedas cercanas",
+      body: "Hay monedas disponibles cerca de ti.",
+      url: "paintfoot://coins",
+      cooldownMs: 30 * 60_000,
+    });
+  }, [activeCoins, currentCoinProximityId, location]);
+
+  useEffect(() => {
+    if (!location || !effectiveCoinCenter || !currentCoinRegionId) return;
     let cancelled = false;
-    const loadStreetCoins = async () => {
-      await prefetchRoadRegionsNear(location);
-      const cachedSegments = await getRoadSegmentsNearTrack([location], 0.005);
-      if (cancelled) return;
-      roadSegmentsRef.current = cachedSegments;
-      const streetCoins = createStreetCoins(location, cachedSegments);
-      if (streetCoins.length === 0) {
-        const fallback = centerCoinOnNearestRoad(location, cachedSegments);
-        streetCoins.push({
-          id: `street-fallback-${Date.now()}`,
-          ...fallback,
-          value: 1,
-          availableAt: Date.now() + 15_000,
-        });
+    const centers = [effectiveCoinCenter];
+    if (distanceInMeters(location, effectiveCoinCenter) > COIN_LOAD_RADIUS_METERS / 2) {
+      centers.push(location);
+    }
+    const distanceToLoadedArea = (coin: MapCoin) =>
+      Math.min(...centers.map((center) => distanceInMeters(coin, center)));
+    const showCatalog = async (catalog: MapCoin[], label: string) => {
+      const localCatalog = catalog
+        .filter((coin) => distanceToLoadedArea(coin) <= COIN_UNLOAD_RADIUS_METERS)
+        .sort((first, second) =>
+          distanceToLoadedArea(first) - distanceToLoadedArea(second) ||
+          first.id.localeCompare(second.id),
+        )
+        .slice(0, COIN_ACTIVE_MEMORY_LIMIT);
+      const availableCoins = await filterUncollectedCoins(localCatalog);
+      if (cancelled) return availableCoins;
+      activeCoinsRef.current = availableCoins;
+      setActiveCoins(availableCoins);
+      if (DEBUG_COINS) {
+        console.info(
+          `[Coins] region actual: ${currentCoinRegionId} · ${label}: ${availableCoins.length}`,
+        );
       }
-      activeCoinsRef.current = streetCoins;
-      setActiveCoins(streetCoins);
+      return availableCoins;
     };
-    void loadStreetCoins();
+    const loadRoadSegments = async (center: Coordinate) => {
+      const bundledSegments = isInsideSanLuisRioColoradoUrbanArea(center)
+        ? getBundledSanLuisRioColoradoRoadSegmentsNear(
+            center,
+            COIN_UNLOAD_RADIUS_METERS,
+          )
+        : [];
+      const cached = await getRoadSegmentsNearTrack(
+        [center],
+        COIN_UNLOAD_RADIUS_METERS / 111_320,
+      );
+      let segments = [...new Map(
+        [...bundledSegments, ...cached].map((segment) => [segment.id, segment]),
+      ).values()];
+      if (segments.length > 0 || !isOnlineRef.current) return segments;
+      try {
+        await prefetchRoadRegionsNear(center);
+        segments = await getRoadSegmentsNearTrack(
+          [center],
+          COIN_UNLOAD_RADIUS_METERS / 111_320,
+        );
+      } catch {
+        debugLog("ROAD", "La cache vial cercana se completara en segundo plano.");
+      }
+      if (segments.length > 0) return segments;
+      try {
+        const latitudePadding = COIN_LOAD_RADIUS_METERS / 111_320;
+        const longitudePadding = latitudePadding /
+          Math.max(0.2, Math.cos((center.latitude * Math.PI) / 180));
+        segments = await fetchRoadNetworkForBounds({
+          south: center.latitude - latitudePadding,
+          west: center.longitude - longitudePadding,
+          north: center.latitude + latitudePadding,
+          east: center.longitude + longitudePadding,
+        });
+        if (segments.length > 0) {
+          await saveRoadSegmentsToCache(segments, {
+            coverageStatus: "partial",
+            priority: 80,
+          });
+        }
+      } catch {
+        debugLog("ROAD", "Se usaran las calles guardadas cuando esten disponibles.");
+      }
+      return segments;
+    };
+    const loadStreetCoins = async () => {
+      const storedCatalog = await getStoredWorldCoinCatalogNear(centers).catch(() => []);
+      if (storedCatalog.length > 0) await showCatalog(storedCatalog, "guardadas");
+
+      const segmentGroups = await Promise.all(centers.map(loadRoadSegments));
+      const segments = [...new Map(
+        segmentGroups.flat().map((segment) => [segment.id, segment]),
+      ).values()];
+      if (cancelled) return;
+      roadSegmentsRef.current = segments;
+      const generated = centers.flatMap((center) =>
+        createRegionalStreetCoins(center, segments),
+      );
+      // Las densidades anteriores siguen persistidas para no perder estados;
+      // cuando existe geometria local se dibuja solo v6 y se evitan traslapes.
+      const regionalCatalog = generated.length > 0 ? generated : storedCatalog;
+      if (generated.length > 0) {
+        void saveWorldCoinCatalog(generated, myPlayerId).catch(() => undefined);
+      }
+      await showCatalog(regionalCatalog, "vias regionales");
+      if (DEBUG_COINS) {
+        console.info(`[Coins] vias cargadas: ${segments.length}`);
+      }
+    };
+    void loadStreetCoins().catch((error) => {
+      if (DEBUG_COINS) console.info(`[Coins] carga diferida: ${String(error)}`);
+    });
     return () => {
       cancelled = true;
     };
-  }, [location]);
-
-  useEffect(() => {
-    if (roadMatchStatus !== "ready" || roadSegmentsRef.current.length === 0) return;
-    const centeredCoins = activeCoinsRef.current.map((coin) => {
-      const coordinate = centerCoinOnNearestRoad(coin, roadSegmentsRef.current);
-      return {
-        ...coin,
-        latitude: coordinate.latitude,
-        longitude: coordinate.longitude,
-      };
-    });
-    activeCoinsRef.current = centeredCoins;
-    setActiveCoins(centeredCoins);
-  }, [roadMatchStatus]);
+  }, [currentCoinProximityId, currentCoinRegionId, myPlayerId]);
 
   useEffect(() => {
     multiplayerPreferencesRef.current = multiplayerPreferences;
@@ -573,6 +610,7 @@ export default function MapScreen() {
         setTerritories((current) => {
           if (globalTerritoriesLoadedRef.current) {
             let gameEvent: { message: string; type: "success" | "warning" | "info" } | null = null;
+            let changedTerritoryId: string | null = null;
             for (const territory of globalTerritories) {
               const previous = current.find(
                 (item) =>
@@ -588,6 +626,7 @@ export default function MapScreen() {
                         : "Territorio actualizado",
                   type: previous.playerId === myPlayerId ? "warning" : "success",
                 };
+                changedTerritoryId = territory.id;
                 break;
               }
               if (
@@ -596,8 +635,10 @@ export default function MapScreen() {
                 territory.status === "protected"
               ) {
                 gameEvent = { message: "Territorio protegido", type: "warning" };
+                changedTerritoryId = territory.id;
               } else if (!previous && !gameEvent) {
                 gameEvent = { message: "Territorio conquistado", type: "success" };
+                changedTerritoryId = territory.id;
               }
             }
             if (gameEvent) {
@@ -605,6 +646,20 @@ export default function MapScreen() {
                 id: "multiplayer-territory",
                 type: gameEvent.type,
                 message: gameEvent.message,
+              });
+              const stolen = gameEvent.message === "Territorio robado por otro jugador";
+              void sendLocalGameNotification({
+                category: "world",
+                eventKey: `world_territory:${changedTerritoryId ?? "nearby"}:${gameEvent.message}`,
+                title: stolen ? "Territorio robado" : gameEvent.message,
+                body: stolen
+                  ? "Otro jugador capturó uno de tus territorios."
+                  : "El mundo global de PaintFoot.io fue actualizado.",
+                url: changedTerritoryId
+                  ? `paintfoot://territory/${changedTerritoryId}`
+                  : "paintfoot://map",
+                territoryId: changedTerritoryId ?? undefined,
+                cooldownMs: 60_000,
               });
             }
           }
@@ -895,7 +950,7 @@ export default function MapScreen() {
               data.id !== myPlayerId
             ) {
               mapRef.current?.injectJavaScript(
-                `window.setOtherPlayerLocation('${data.id}', ${data.latitude}, ${data.longitude}, '${data.color || "#FF8800"}'); true;`,
+                `window.setOtherPlayerLocation('${data.id}', ${data.latitude}, ${data.longitude}, '${data.color || Palette.warning}'); true;`,
               );
             }
           } catch (error) {
@@ -1106,6 +1161,18 @@ export default function MapScreen() {
               timestamp: newLocation.timestamp,
             };
 
+            if (
+              !shouldAcceptStableGpsUpdate(latestLocationRef.current, newCoord, {
+                accuracyMeters: reportedAccuracy,
+                reportedSpeedMps: newLocation.coords.speed,
+                tracking: false,
+                baseDistanceMeters: MINIMUM_POINT_DISTANCE_METERS,
+                maximumSpeedMps: MAX_ACCEPTABLE_SPEED_MPS,
+              })
+            ) {
+              return;
+            }
+
             latestLocationRef.current = newCoord;
             setLocation(newCoord);
             if (multiplayerPreferencesRef.current.shareRealtimeLocation) {
@@ -1243,6 +1310,18 @@ export default function MapScreen() {
               ? "Territorio enviado para validar"
               : "Territorio conquistado",
       });
+      void sendLocalGameNotification({
+        category: "territories",
+        eventKey: `territory_candidate:${newTerritories.map((item) => item.id).join(":")}`,
+        title: hasPendingSteal || hasPendingGlobalSync
+          ? "Territorio pendiente de validación"
+          : "Territorio conquistado",
+        body: hasPendingSteal || hasPendingGlobalSync
+          ? "Tu conquista será validada cuando termine la sincronización."
+          : "Tu nuevo territorio fue guardado.",
+        url: `paintfoot://territory/${newTerritories[0].id}`,
+        territoryId: newTerritories[0].id,
+      });
 
       sessionTerritoryCountRef.current += newTerritories.length;
       sessionAreaM2Ref.current += newTerritories.reduce(
@@ -1305,6 +1384,14 @@ export default function MapScreen() {
                 type: "warning",
                 message: "Territorio protegido",
               });
+              void sendLocalGameNotification({
+                category: "territories",
+                eventKey: `territory_rejected:${candidate.id}:protected`,
+                title: "Conquista rechazada",
+                body: "El territorio estaba protegido.",
+                url: `paintfoot://territory/${candidate.id}`,
+                territoryId: candidate.id,
+              });
               const stored = await discardStoredPendingCapture(candidate.id);
               territoriesRef.current = stored;
               setTerritories(stored);
@@ -1317,6 +1404,14 @@ export default function MapScreen() {
                 message: candidate.targetTerritoryId
                   ? "No se pudo capturar el territorio"
                   : "Territorio no válido",
+              });
+              void sendLocalGameNotification({
+                category: "territories",
+                eventKey: `territory_rejected:${candidate.id}`,
+                title: "Conquista rechazada",
+                body: "La conquista no pudo validarse.",
+                url: `paintfoot://territory/${candidate.id}`,
+                territoryId: candidate.id,
               });
               continue;
             }
@@ -1332,6 +1427,16 @@ export default function MapScreen() {
               message: candidate.targetTerritoryId
                 ? "Territorio robado"
                 : "Territorio conquistado",
+            });
+            void sendLocalGameNotification({
+              category: "territories",
+              eventKey: `territory_validated:${result.territory.id}`,
+              title: candidate.targetTerritoryId ? "Territorio robado" : "Territorio conquistado",
+              body: candidate.targetTerritoryId
+                ? "La captura fue validada."
+                : "Tu nuevo territorio fue guardado.",
+              url: `paintfoot://territory/${result.territory.id}`,
+              territoryId: result.territory.id,
             });
           }
         })
@@ -1758,30 +1863,18 @@ export default function MapScreen() {
       };
       const previousCoordinate = lastAcceptedCoordinateRef.current;
 
-      if (previousCoordinate) {
-        const distance = distanceInMeters(previousCoordinate, newCoord);
-
-        if (distance < MINIMUM_POINT_DISTANCE_METERS) {
-          persistPoint(false);
-          return false;
-        }
-
-        if (
-          previousCoordinate.timestamp !== undefined &&
-          newCoord.timestamp !== undefined
-        ) {
-          const elapsedSeconds =
-            (newCoord.timestamp - previousCoordinate.timestamp) / 1000;
-          const calculatedSpeed = distance / elapsedSeconds;
-
-          if (
-            elapsedSeconds > 0 &&
-            calculatedSpeed > MAX_ACCEPTABLE_SPEED_MPS
-          ) {
-            persistPoint(false);
-            return false;
-          }
-        }
+      if (
+        !shouldAcceptStableGpsUpdate(previousCoordinate, newCoord, {
+          accuracyMeters: point.accuracy,
+          reportedSpeedMps: point.speed,
+          sensorMoving: sensor?.moving,
+          tracking: true,
+          baseDistanceMeters: MINIMUM_POINT_DISTANCE_METERS,
+          maximumSpeedMps: MAX_ACCEPTABLE_SPEED_MPS,
+        })
+      ) {
+        persistPoint(false);
+        return false;
       }
 
       lastAcceptedCoordinateRef.current = newCoord;
@@ -1821,15 +1914,12 @@ export default function MapScreen() {
             distanceInMeters(coin, newCoord) <= 15,
         );
         if (nearbyCoins.length > 0) {
-          void Promise.all(nearbyCoins.map((coin) => collectCoin(coin))).then(
+          void Promise.all(nearbyCoins.map((coin) => collectCoin(coin, myPlayerId))).then(
             (results) => {
               const collectedIds = new Set(
                 nearbyCoins.filter((_, index) => results[index]).map((coin) => coin.id),
               );
               if (collectedIds.size === 0) return;
-              nearbyCoins
-                .filter((coin) => collectedIds.has(coin.id))
-                .forEach((coin) => scheduleCoinRespawn(coin));
               activeCoinsRef.current = activeCoinsRef.current.filter(
                 (coin) => !collectedIds.has(coin.id),
               );
@@ -1840,23 +1930,16 @@ export default function MapScreen() {
                 type: "success",
                 message: `Moneda recogida · +${collectedIds.size}`,
               });
+              void sendLocalGameNotification({
+                category: "coins",
+                eventKey: `coins_collected:${Math.floor(Date.now() / 60_000)}`,
+                title: "Recompensa agregada",
+                body: "Tus monedas fueron guardadas.",
+                url: "paintfoot://coins",
+                cooldownMs: 60_000,
+              });
             },
           );
-        }
-        const lastCoinCoordinate = lastCoinCoordinateRef.current;
-        const distanceFromLastCoin = lastCoinCoordinate
-          ? distanceInMeters(lastCoinCoordinate, newCoord)
-          : 0;
-        if (!lastCoinCoordinate || distanceFromLastCoin >= 20) {
-          const coin: MapCoin = {
-            id: `${sessionStartedAtRef.current}-${rawTrackRef.current.length}`,
-            ...centerCoinOnNearestRoad(newCoord, roadSegmentsRef.current),
-            value: 1,
-            availableAt: Date.now() + 15_000,
-          };
-          lastCoinCoordinateRef.current = newCoord;
-          activeCoinsRef.current = [...activeCoinsRef.current, coin];
-          setActiveCoins(activeCoinsRef.current);
         }
       }
       mapRef.current?.injectJavaScript(
@@ -1893,7 +1976,7 @@ export default function MapScreen() {
 
       return true;
     },
-    [myPlayerId, playerProfile.color, scheduleCoinRespawn, scheduleRoadMatch],
+    [myPlayerId, playerProfile.color, scheduleRoadMatch],
   );
 
   const importStoredRoutePoints = useCallback(async () => {
@@ -2124,7 +2207,6 @@ export default function MapScreen() {
         setIntersectionCount(0);
         setRoadMatchStatus("waiting");
         lastAcceptedCoordinateRef.current = null;
-        lastCoinCoordinateRef.current = null;
         routeCoordsRef.current = [];
         mapRef.current?.injectJavaScript("window.clearRoute?.(); true;");
 
@@ -2152,6 +2234,13 @@ export default function MapScreen() {
             ? `Apoyo de sensores activo (${activeSensorCount} fuentes).`
             : "Sensores no disponibles; continua GPS + Map Matching.",
         );
+        if (motionSensorTrackerRef.current.getPermissionIssues().length > 0) {
+          showFeedback({
+            id: "sensor-permission-denied",
+            type: "warning",
+            message: "Sin permiso de movimiento o pasos; el recorrido usará solo GPS.",
+          });
+        }
       });
 
       const subscription = await Location.watchPositionAsync(
@@ -2304,6 +2393,15 @@ export default function MapScreen() {
   ]);
 
   useEffect(() => {
+    if (mapStatus !== "ready" || typeof requestedTerritoryId !== "string") return;
+    const exists = territories.some((territory) => territory.id === requestedTerritoryId);
+    if (!exists) return;
+    mapRef.current?.injectJavaScript(
+      `window.focusTerritory?.(${JSON.stringify(requestedTerritoryId)}); true;`,
+    );
+  }, [mapStatus, requestedTerritoryId, territories]);
+
+  useEffect(() => {
     if (!location || !playerProfile.globalId) return;
     void globalMultiplayerRef.current?.update(
       location,
@@ -2345,8 +2443,8 @@ export default function MapScreen() {
   );
 
   const lightTheme = resolvedTheme === "light";
-  const panelTextColor = lightTheme ? "#172033" : "#FFFFFF";
-  const secondaryTextColor = lightTheme ? "#4B5875" : "#C5CAE9";
+  const panelTextColor = lightTheme ? Palette.navy800 : Palette.white;
+  const secondaryTextColor = lightTheme ? Palette.navy600 : Palette.textSoft;
 
   // ─── Pantalla principal ──────────────────────────────────────
   return (
@@ -2380,9 +2478,89 @@ export default function MapScreen() {
               detail?: string;
             };
             if (message.type === "map-ready") setMapStatus("ready");
+            if (message.type === "coin-region-request" && message.detail) {
+              const requested = JSON.parse(message.detail) as {
+                latitude?: number;
+                longitude?: number;
+              };
+              if (
+                Number.isFinite(requested.latitude) &&
+                Number.isFinite(requested.longitude)
+              ) {
+                const nextCenter: Coordinate = {
+                  latitude: requested.latitude!,
+                  longitude: requested.longitude!,
+                };
+                const previousCenter = coinViewportCenterRef.current;
+                if (
+                  !previousCenter ||
+                  distanceInMeters(previousCenter, nextCenter) >=
+                    COIN_LOAD_RADIUS_METERS / 4
+                ) {
+                  coinViewportCenterRef.current = nextCenter;
+                  setCoinViewportCenter(nextCenter);
+                }
+              }
+            }
             if (message.type === "map-error") {
               console.warn("Error del mapa:", message.detail ?? "desconocido");
               setMapStatus("error");
+            }
+            if (message.type === "coin-viewport" && message.detail) {
+              const diagnostics = JSON.parse(message.detail) as {
+                stored?: number;
+                inViewport?: number;
+                hiddenByPanel?: number;
+                rendered?: number;
+                reason?: string;
+              };
+              if (DEBUG_COINS) {
+                console.info(
+                  `[Coins] SQLite/mapa: ${diagnostics.stored ?? 0} · viewport: ${diagnostics.inViewport ?? 0} · ocultas por panel: ${diagnostics.hiddenByPanel ?? 0} · renderizadas: ${diagnostics.rendered ?? 0} · ${diagnostics.reason ?? "sin detalle"}`,
+                );
+              }
+              const renderedCoins = diagnostics.rendered ?? 0;
+              const fallbackAreaId = currentCoinProximityId
+                ? `${currentCoinRegionId}:${currentCoinProximityId}`
+                : null;
+              if (renderedCoins >= WORLD_COIN_MINIMUM_NEARBY_VISIBLE) {
+                coinFallbackRegionRef.current = null;
+              }
+              if (
+                renderedCoins < WORLD_COIN_MINIMUM_NEARBY_VISIBLE &&
+                location &&
+                currentCoinRegionId &&
+                fallbackAreaId &&
+                roadSegmentsRef.current.length > 0 &&
+                coinFallbackRegionRef.current !== fallbackAreaId
+              ) {
+                coinFallbackRegionRef.current = fallbackAreaId;
+                const fallbackCenter = effectiveCoinCenter ?? location;
+                const fallbackSeed = createRegionalStreetCoins(
+                  fallbackCenter,
+                  roadSegmentsRef.current,
+                ).slice(0, WORLD_COIN_MINIMUM_NEARBY_VISIBLE * 6);
+                void filterUncollectedCoins(fallbackSeed).then((visibleSeed) => {
+                  if (visibleSeed.length === 0) return;
+                  const merged = new Map<string, MapCoin>();
+                  visibleSeed.forEach((coin) => merged.set(coin.id, coin));
+                  activeCoinsRef.current.forEach((coin) => {
+                    if (merged.size < COIN_ACTIVE_MEMORY_LIMIT) merged.set(coin.id, coin);
+                  });
+                  const nextCoins = [...merged.values()].slice(0, COIN_ACTIVE_MEMORY_LIMIT);
+                  activeCoinsRef.current = nextCoins;
+                  setActiveCoins(nextCoins);
+                  mapRef.current?.injectJavaScript(
+                    `window.setCoins?.(${JSON.stringify(nextCoins)}); true;`,
+                  );
+                  void saveWorldCoinCatalog(visibleSeed, myPlayerId).catch(() => undefined);
+                  if (DEBUG_COINS) {
+                    console.info(
+                      `[Coins] refuerzo vial cercano: ${visibleSeed.length} (faltaban ${Math.max(0, WORLD_COIN_MINIMUM_NEARBY_VISIBLE - renderedCoins)})`,
+                    );
+                  }
+                });
+              }
             }
           } catch {
             setMapStatus("error");
@@ -2440,14 +2618,20 @@ export default function MapScreen() {
 
       {/* Panel de controles */}
       <View
+        onLayout={({ nativeEvent }) => {
+          const panelHeight = Math.ceil(nativeEvent.layout.height);
+          mapRef.current?.injectJavaScript(
+            `window.setMapBottomInset?.(${panelHeight}); true;`,
+          );
+        }}
         style={[
           styles.controlPanel,
           {
             bottom: Math.max(insets.bottom + 8, Platform.OS === "ios" ? 40 : 24),
             maxHeight: Math.max(210, height * 0.48),
             backgroundColor: lightTheme
-              ? "rgba(255, 255, 255, 0.95)"
-              : "rgba(26, 26, 46, 0.92)",
+              ? Palette.overlayLight
+              : Palette.overlayNavy,
           },
         ]}
       >
@@ -2465,7 +2649,7 @@ export default function MapScreen() {
           <View
             style={[
               styles.statusDot,
-              { backgroundColor: isTracking ? "#4CAF50" : "#9E9E9E" },
+              { backgroundColor: isTracking ? Palette.successStrong : Palette.textMuted },
             ]}
           />
           <Text style={[styles.statusText, { color: panelTextColor }]}>
@@ -2553,13 +2737,13 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 8,
     bottom: Platform.select({ ios: 130, android: 116 }),
-    backgroundColor: "rgba(255, 255, 255, 0.82)",
+    backgroundColor: Palette.overlayLightSoft,
     borderRadius: 4,
     paddingHorizontal: 5,
     paddingVertical: 3,
   },
   attributionText: {
-    color: "#222222",
+    color: Palette.navy900,
     fontSize: 10,
   },
   loadingBadge: {
@@ -2569,13 +2753,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "rgba(26, 26, 46, 0.92)",
+    backgroundColor: Palette.overlayNavy,
     borderRadius: 16,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
   loadingBadgeText: {
-    color: "#FFFFFF",
+    color: Palette.white,
     fontSize: 13,
     fontWeight: "600",
   },
@@ -2584,20 +2768,20 @@ const styles = StyleSheet.create({
     top: 54,
     left: 16,
     right: 16,
-    backgroundColor: "rgba(120, 20, 20, 0.94)",
+    backgroundColor: Palette.overlayNavy,
     borderRadius: 12,
     padding: 12,
   },
   retryButton: {
     alignSelf: "center",
-    backgroundColor: "#FFFFFF",
+    backgroundColor: Palette.white,
     borderRadius: 8,
     marginTop: 10,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
   retryButtonText: {
-    color: "#7A1414",
+    color: Palette.navy950,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -2606,12 +2790,12 @@ const styles = StyleSheet.create({
     top: 116,
     left: 16,
     right: 16,
-    backgroundColor: "rgba(120, 72, 10, 0.94)",
+    backgroundColor: Palette.overlayNavy,
     borderRadius: 12,
     padding: 12,
   },
   mapErrorText: {
-    color: "#FFFFFF",
+    color: Palette.white,
     fontSize: 14,
     fontWeight: "600",
     textAlign: "center",
@@ -2623,7 +2807,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
-    backgroundColor: "rgba(26, 26, 46, 0.92)",
+    backgroundColor: Palette.overlayNavy,
     borderRadius: 16,
     paddingHorizontal: 11,
     paddingVertical: 8,
@@ -2634,7 +2818,7 @@ const styles = StyleSheet.create({
     borderRadius: 5,
   },
   gpsBadgeText: {
-    color: "#FFFFFF",
+    color: Palette.white,
     fontSize: 12,
     fontWeight: "600",
   },
@@ -2642,13 +2826,13 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#1A1A2E",
+    backgroundColor: Palette.navy900,
     padding: 32,
   },
   loadingText: {
     marginTop: 16,
     fontSize: 16,
-    color: "#E0E0E0",
+    color: Palette.textSoft,
     fontWeight: "500",
   },
   errorIcon: {
@@ -2657,7 +2841,7 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: 16,
-    color: "#E0E0E0",
+    color: Palette.textSoft,
     textAlign: "center",
     lineHeight: 24,
   },
@@ -2665,11 +2849,11 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 16,
     right: 16,
-    backgroundColor: "rgba(26, 26, 46, 0.92)",
+    backgroundColor: Palette.overlayNavy,
     borderRadius: 20,
     overflow: "hidden",
     // Sombra
-    shadowColor: "#000",
+    shadowColor: Palette.black,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 8,
@@ -2691,29 +2875,29 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: 15,
     fontWeight: "600",
-    color: "#FFFFFF",
+    color: Palette.white,
     flex: 1,
   },
   coinBalance: {
-    color: "#FFD54A",
+    color: Palette.gold,
     fontSize: 15,
     fontWeight: "900",
   },
   coordCount: {
     fontSize: 13,
-    color: "#9E9E9E",
+    color: Palette.textMuted,
   },
   territoryCount: {
     fontSize: 13,
-    color: "#B39DDB",
+    color: Palette.textSecondary,
   },
   territoryAreaText: {
-    color: "#80CBC4",
+    color: Palette.success,
     fontSize: 13,
     fontWeight: "700",
   },
   backgroundStatusText: {
-    color: "#C5CAE9",
+    color: Palette.textSoft,
     fontSize: 12,
   },
   roadStatusText: {
@@ -2726,13 +2910,13 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   intentButton: {
-    backgroundColor: "#3949AB",
+    backgroundColor: Palette.navy500,
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
   },
   intentButtonText: {
-    color: "#FFFFFF",
+    color: Palette.white,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2747,21 +2931,21 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   themeButton: {
-    backgroundColor: "#E3E7EF",
+    backgroundColor: Palette.ice100,
     borderRadius: 8,
     paddingHorizontal: 9,
     paddingVertical: 6,
   },
   themeButtonActive: {
-    backgroundColor: "#3949AB",
+    backgroundColor: Palette.navy500,
   },
   themeButtonText: {
-    color: "#384152",
+    color: Palette.navy700,
     fontSize: 11,
     fontWeight: "700",
   },
   themeButtonTextActive: {
-    color: "#FFFFFF",
+    color: Palette.white,
   },
   sensorSummary: {
     gap: 4,
@@ -2771,7 +2955,7 @@ const styles = StyleSheet.create({
     lineHeight: 17,
   },
   magneticWarning: {
-    color: "#FF9800",
+    color: Palette.warning,
     fontSize: 12,
     fontWeight: "700",
   },
@@ -2789,15 +2973,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   startButton: {
-    backgroundColor: "#4CAF50",
+    backgroundColor: Palette.successStrong,
   },
   stopButton: {
-    backgroundColor: "#FF4444",
+    backgroundColor: Palette.danger,
   },
   actionButtonText: {
     fontSize: 16,
     fontWeight: "700",
-    color: "#FFFFFF",
+    color: Palette.white,
     letterSpacing: 0.5,
   },
 });

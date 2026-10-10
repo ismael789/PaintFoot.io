@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   Animated,
@@ -16,10 +17,10 @@ import {
 } from "@/services/global-feedback";
 
 const VISUALS: Record<FeedbackType, { icon: string; label: string; color: string }> = {
-  info: { icon: "i", label: "Información", color: "#40C4FF" },
-  success: { icon: "✓", label: "Completado", color: "#55D98A" },
-  warning: { icon: "!", label: "Atención", color: "#FFC857" },
-  error: { icon: "×", label: "No completado", color: "#FF6B7A" },
+  info: { icon: "i", label: "Información", color: Palette.sky400 },
+  success: { icon: "✓", label: "Completado", color: Palette.success },
+  warning: { icon: "!", label: "Atención", color: Palette.gold },
+  error: { icon: "×", label: "No completado", color: Palette.dangerSoft },
 };
 
 export function GlobalFeedback() {
@@ -87,7 +88,7 @@ export function GlobalFeedback() {
         style={[
           styles.card,
           {
-            backgroundColor: dark ? "#172038F2" : "#FFFFFFF5",
+            backgroundColor: dark ? Palette.overlayNavy : Palette.overlayLight,
             borderColor: visual.color,
             opacity,
             transform: [{ translateY }],
@@ -99,7 +100,7 @@ export function GlobalFeedback() {
         </View>
         <View style={styles.copy}>
           <Text style={[styles.label, { color: visual.color }]}>{visual.label}</Text>
-          <Text style={[styles.message, { color: dark ? "#FFFFFF" : "#172038" }]}>
+          <Text style={[styles.message, { color: dark ? Palette.white : Palette.navy800 }]}>
             {displayed.message}
           </Text>
         </View>
@@ -127,7 +128,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 13,
     paddingVertical: 10,
-    shadowColor: "#000000",
+    shadowColor: Palette.black,
     shadowOffset: { width: 0, height: 5 },
     shadowOpacity: 0.28,
     shadowRadius: 10,
@@ -140,7 +141,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 10,
   },
-  iconText: { color: "#101426", fontSize: 18, fontWeight: "900" },
+  iconText: { color: Palette.navy900, fontSize: 18, fontWeight: "900" },
   copy: { flex: 1 },
   label: { fontSize: 10, fontWeight: "900", letterSpacing: 0.7, textTransform: "uppercase" },
   message: { fontSize: 14, fontWeight: "700", lineHeight: 19, marginTop: 1 },

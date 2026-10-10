@@ -7,20 +7,24 @@ import '@/global.css';
 
 import { Platform } from 'react-native';
 
+import { Palette } from './palette';
+
+export { Palette };
+
 export const Colors = {
   light: {
-    text: '#000000',
-    background: '#ffffff',
-    backgroundElement: '#F0F0F3',
-    backgroundSelected: '#E0E1E6',
-    textSecondary: '#60646C',
+    text: Palette.navy900,
+    background: Palette.ice50,
+    backgroundElement: Palette.ice100,
+    backgroundSelected: Palette.sky200,
+    textSecondary: Palette.textSecondary,
   },
   dark: {
-    text: '#ffffff',
-    background: '#000000',
-    backgroundElement: '#212225',
-    backgroundSelected: '#2E3135',
-    textSecondary: '#B0B4BA',
+    text: Palette.white,
+    background: Palette.navy950,
+    backgroundElement: Palette.navy800,
+    backgroundSelected: Palette.navy700,
+    textSecondary: Palette.textSecondary,
   },
 } as const;
 

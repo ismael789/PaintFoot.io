@@ -16,6 +16,7 @@ import {
   type AndroidSensorCapability,
   type AndroidSensorId,
 } from "../../modules/paintfoot-android-sensors";
+import { SENSOR_RULES } from "../config/territory";
 import type { ConfidenceLevel, SensorEvidence } from "../types/game";
 import { resolveCapabilityStatus } from "./sensor-capability-logic";
 
@@ -48,7 +49,8 @@ export type SensorOperationalStatus =
   | "temporarily-unavailable"
   | "apk-only"
   | "low-accuracy"
-  | "interference";
+  | "interference"
+  | "permission-denied";
 
 export interface SensorCapabilityState {
   id: SensorCapabilityId;
@@ -82,7 +84,7 @@ const DEFINITIONS: Omit<
   { id: "stepDetector", name: "Step Detector", category: "Actividad", purpose: "Eventos de pasos en tiempo real", runtime: "apk" },
   { id: "significantMotion", name: "Significant Motion", category: "Actividad", purpose: "Reanudacion de movimiento y eficiencia", runtime: "apk" },
   { id: "barometer", name: "Barometro", category: "Entorno", purpose: "Presion y desnivel aproximado", runtime: "expo" },
-  { id: "lightSensor", name: "Sensor de luz", category: "Entorno", purpose: "Tema automatico", runtime: "expo" },
+  { id: "lightSensor", name: "Sensor de luz", category: "Entorno", purpose: "Claro u oscuro solo con Tema Auto", runtime: "expo" },
   { id: "proximity", name: "Proximidad", category: "Entorno", purpose: "Deteccion de bolsillo", runtime: "apk" },
   { id: "magnetometer", name: "Magnetometro calibrado", category: "Entorno", purpose: "Campo magnetico utilizable", runtime: "expo" },
   { id: "uncalibratedMagnetometer", name: "Magnetometro sin calibrar", category: "Entorno", purpose: "Interferencia y confianza magnetica", runtime: "expo" },
@@ -100,6 +102,9 @@ function safeAvailability(check: () => Promise<boolean>) {
 
 class SensorCapabilityManager {
   private listeners = new Set<() => void>();
+  private permissionDeniedIds = new Set<SensorCapabilityId>();
+  private lowAccuracyIds = new Set<SensorCapabilityId>();
+  private temporaryFailureAt = new Map<SensorCapabilityId, number>();
   private states: SensorCapabilityState[] = DEFINITIONS.map((definition) => ({
     ...definition,
     available: null,
@@ -142,6 +147,7 @@ class SensorCapabilityManager {
       pedometer,
       uncalibratedMagnetometer,
       nativeCapabilities,
+      locationPermission,
     ] = await Promise.all([
       safeAvailability(() => Location.hasServicesEnabledAsync()),
       safeAvailability(() => Accelerometer.isAvailableAsync()),
@@ -153,6 +159,7 @@ class SensorCapabilityManager {
       safeAvailability(() => Pedometer.isAvailableAsync()),
       safeAvailability(() => MagnetometerUncalibrated.isAvailableAsync()),
       getAndroidSensorCapabilities().catch(() => null),
+      Location.getForegroundPermissionsAsync().catch(() => null),
     ]);
 
     const expoAvailability: Partial<Record<SensorCapabilityId, boolean>> = {
@@ -168,6 +175,14 @@ class SensorCapabilityManager {
       uncalibratedMagnetometer,
     };
 
+    if (locationPermission?.status === "denied") {
+      this.permissionDeniedIds.add("gps");
+      this.permissionDeniedIds.add("compass");
+    } else if (locationPermission?.status === "granted") {
+      this.permissionDeniedIds.delete("gps");
+      this.permissionDeniedIds.delete("compass");
+    }
+
     this.states = this.states.map((state) => {
       const expoValue = expoAvailability[state.id];
       if (expoValue !== undefined) {
@@ -176,9 +191,11 @@ class SensorCapabilityManager {
           available: expoValue,
           active: expoValue ? state.active : false,
           status: expoValue
-            ? state.active
-              ? "active"
-              : "available"
+            ? this.permissionDeniedIds.has(state.id)
+              ? "permission-denied"
+              : state.active
+                ? "active"
+                : "available"
             : "unavailable",
         };
       }
@@ -220,12 +237,15 @@ class SensorCapabilityManager {
   }
 
   publishGps(active: boolean, accuracy: number | null) {
+    if (active) this.permissionDeniedIds.delete("gps");
     const state = this.states.find(({ id }) => id === "gps");
     this.patch("gps", {
       available: state?.available ?? true,
       active,
       status:
-        accuracy !== null && accuracy > 20
+        this.permissionDeniedIds.has("gps")
+          ? "permission-denied"
+          : accuracy !== null && accuracy > 20
           ? "low-accuracy"
           : active
             ? "active"
@@ -237,6 +257,9 @@ class SensorCapabilityManager {
 
   publishEvidence(evidence: SensorEvidence) {
     const availability = evidence.availability;
+    if (evidence.activeSensors?.compass) {
+      this.permissionDeniedIds.delete("compass");
+    }
     const values: Partial<Record<SensorCapabilityId, string | undefined>> = {
       compass:
         evidence.compassHeadingDegrees === null
@@ -322,57 +345,167 @@ class SensorCapabilityManager {
       );
       if (state.id === "gps") return state;
       if (state.runtime === "apk" && state.status === "apk-only") return state;
+      const isActive = evidence.activeSensors
+        ? evidence.activeSensors[
+            state.id as keyof typeof evidence.activeSensors
+          ] === true
+        : values[state.id] !== undefined;
+      const readingAt =
+        evidence.sensorReadingsAt?.[
+          state.id as keyof NonNullable<SensorEvidence["sensorReadingsAt"]>
+        ] ?? 0;
+      const failureAt = this.temporaryFailureAt.get(state.id) ?? 0;
+      if (readingAt > failureAt) {
+        this.temporaryFailureAt.delete(state.id);
+      }
+      const temporarilyUnavailable =
+        this.temporaryFailureAt.has(state.id) && readingAt <= failureAt;
       const magneticInterference =
         (state.id === "magnetometer" ||
           state.id === "uncalibratedMagnetometer" ||
           state.id === "compass") &&
-        evidence.magneticConfidence === "low";
+        isActive && evidence.magneticConfidence === "low";
+      const lowAccuracy =
+        this.lowAccuracyIds.has(state.id) ||
+        (state.id === "compass" &&
+          isActive &&
+          evidence.compassAccuracy !== null &&
+          evidence.compassAccuracy < SENSOR_RULES.minimumCompassAccuracy);
       return {
         ...state,
         available: isAvailable || state.available === true,
-        active: isAvailable,
-        status: magneticInterference
-          ? "interference"
-          : isAvailable
-            ? "active"
+        active: isActive,
+        status: this.permissionDeniedIds.has(state.id)
+          ? "permission-denied"
+          : temporarilyUnavailable
+            ? "temporarily-unavailable"
+            : magneticInterference
+              ? "interference"
+              : lowAccuracy
+                ? "low-accuracy"
+                : isActive
+                  ? "active"
             : state.available
               ? "available"
               : "unavailable",
         value: values[state.id] ?? state.value,
-        lastUpdated: isAvailable ? evidence.timestamp : state.lastUpdated,
+        lastUpdated: isActive ? evidence.timestamp : state.lastUpdated,
       };
     });
     this.emit();
   }
 
-  publishNativeActive(ids: AndroidSensorId[]) {
-    const activeIds = new Set(ids);
+  publishDetectedAvailability(availability: SensorEvidence["availability"]) {
+    this.states = this.states.map((state) => {
+      if (state.id === "gps") return state;
+      if (state.runtime === "apk" && state.status === "apk-only") return state;
+      const detected = availability[state.id as keyof typeof availability];
+      if (detected === undefined) return state;
+      return {
+        ...state,
+        available: detected,
+        active: detected ? state.active : false,
+        status: this.permissionDeniedIds.has(state.id)
+          ? "permission-denied"
+          : detected
+            ? state.active
+              ? state.status
+              : "available"
+            : "unavailable",
+      };
+    });
+    this.emit();
+  }
+
+  publishPermissionIssues(issues: ("motion" | "pedometer")[]) {
+    const denied = new Set(issues);
+    const motionIds: SensorCapabilityId[] = [
+      "accelerometer",
+      "gyroscope",
+      "deviceMotion",
+      "magnetometer",
+      "uncalibratedMagnetometer",
+    ];
+    for (const id of motionIds) {
+      if (denied.has("motion")) this.permissionDeniedIds.add(id);
+      else this.permissionDeniedIds.delete(id);
+    }
+    if (denied.has("pedometer")) this.permissionDeniedIds.add("pedometer");
+    else this.permissionDeniedIds.delete("pedometer");
+    this.states = this.states.map((state) =>
+      this.permissionDeniedIds.has(state.id)
+        ? { ...state, active: false, status: "permission-denied" }
+        : state.status === "permission-denied"
+          ? {
+              ...state,
+              status: state.available ? "available" : "unavailable",
+            }
+          : state,
+    );
+    this.emit();
+  }
+
+  publishNativeRegistered(ids: AndroidSensorId[]) {
+    const registeredIds = new Set(ids);
     this.states = this.states.map((state) =>
       state.runtime !== "apk" || state.status === "apk-only"
         ? state
         : {
             ...state,
-            active: activeIds.has(state.id as AndroidSensorId),
-            status: activeIds.has(state.id as AndroidSensorId)
-              ? "active"
-              : state.available
-                ? "available"
-                : "unavailable",
+            available:
+              registeredIds.has(state.id as AndroidSensorId) || state.available,
+            active: false,
+            status: registeredIds.has(state.id as AndroidSensorId)
+              ? "available"
+              : state.available === false
+                ? "unavailable"
+                : state.status,
           },
     );
     this.emit();
   }
 
+  publishNativeAccuracy(id: AndroidSensorId, accuracy: number) {
+    if (accuracy <= 0) this.lowAccuracyIds.add(id);
+    else this.lowAccuracyIds.delete(id);
+    const state = this.states.find((candidate) => candidate.id === id);
+    if (!state || state.status === "apk-only") return;
+    this.patch(id, {
+      status:
+        accuracy <= 0
+          ? "low-accuracy"
+          : state.active
+            ? "active"
+            : state.available
+              ? "available"
+              : state.status,
+    });
+  }
+
   stopSession() {
     this.states = this.states.map((state) =>
       SESSION_SENSOR_IDS.includes(state.id) && state.active
-        ? { ...state, active: false, status: "available" }
+        ? {
+            ...state,
+            active: false,
+            status: this.lowAccuracyIds.has(state.id)
+              ? "low-accuracy"
+              : "available",
+          }
         : state,
     );
     this.emit();
   }
 
   markTemporaryUnavailable(id: SensorCapabilityId) {
+    const current = this.states.find((state) => state.id === id);
+    if (
+      current?.status === "apk-only" ||
+      this.permissionDeniedIds.has(id)
+    ) {
+      return;
+    }
+    this.temporaryFailureAt.set(id, Date.now());
     this.patch(id, {
       active: false,
       status: "temporarily-unavailable",

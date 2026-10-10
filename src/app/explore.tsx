@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import Constants from "expo-constants";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import {
@@ -22,14 +23,15 @@ const STATUS_PRESENTATION: Record<
   SensorOperationalStatus,
   { icon: string; label: string; color: string }
 > = {
-  checking: { icon: "⚪", label: "Comprobando", color: "#8A94A6" },
-  available: { icon: "⚪", label: "Disponible / Inactivo", color: "#8A94A6" },
-  active: { icon: "🟢", label: "Activo", color: "#2E9B52" },
-  unavailable: { icon: "❌", label: "No disponible en este dispositivo", color: "#C94141" },
-  "temporarily-unavailable": { icon: "⚠️", label: "No disponible temporalmente", color: "#E58B18" },
-  "apk-only": { icon: "📱", label: "Solo APK Android", color: "#536DFE" },
-  "low-accuracy": { icon: "⚠️", label: "Precision baja", color: "#E58B18" },
-  interference: { icon: "⚠️", label: "Interferencia", color: "#E58B18" },
+  checking: { icon: "⚪", label: "Comprobando", color: Palette.textMuted },
+  available: { icon: "⚪", label: "Disponible / Inactivo", color: Palette.textMuted },
+  active: { icon: "🟢", label: "Activo", color: Palette.success },
+  unavailable: { icon: "❌", label: "No disponible en este dispositivo", color: Palette.danger },
+  "temporarily-unavailable": { icon: "⚠️", label: "Error temporal", color: Palette.warning },
+  "apk-only": { icon: "📱", label: "Solo APK Android", color: Palette.navy500 },
+  "low-accuracy": { icon: "⚠️", label: "Precision baja", color: Palette.warning },
+  interference: { icon: "⚠️", label: "Interferencia", color: Palette.warning },
+  "permission-denied": { icon: "🔒", label: "Sin permiso", color: Palette.warning },
 };
 
 function SensorRow({ sensor }: { sensor: SensorCapabilityState }) {
@@ -114,7 +116,7 @@ export default function DeviceSensorsScreen() {
         </View>
         <Pressable style={styles.refreshButton} onPress={refresh} disabled={refreshing}>
           {refreshing ? (
-            <ActivityIndicator color="#FFFFFF" size="small" />
+            <ActivityIndicator color={Palette.white} size="small" />
           ) : (
             <Text style={styles.refreshText}>Actualizar</Text>
           )}
@@ -175,35 +177,35 @@ export default function DeviceSensorsScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#101426" },
+  screen: { flex: 1, backgroundColor: Palette.navy900 },
   content: { width: "100%", maxWidth: 720, alignSelf: "center", paddingHorizontal: 16, gap: 18 },
   header: { flexDirection: "row", alignItems: "center", gap: 12 },
   headerCompact: { alignItems: "stretch", flexDirection: "column" },
   headerText: { flex: 1 },
-  title: { color: "#FFFFFF", fontSize: 24, fontWeight: "800" },
-  subtitle: { color: "#AAB2CF", fontSize: 13, marginTop: 4 },
-  refreshButton: { backgroundColor: "#3949AB", borderRadius: 10, minWidth: 92, minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, alignItems: "center", justifyContent: "center" },
-  refreshText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
-  summaryCard: { backgroundColor: "#1A1A2E", borderRadius: 18, padding: 16, gap: 6 },
-  summaryTitle: { color: "#FFFFFF", fontSize: 18, fontWeight: "800" },
-  summaryLine: { color: "#C5CAE9", fontSize: 13 },
-  gameStatus: { color: "#7EE29A", fontSize: 13, fontWeight: "700", marginTop: 6, lineHeight: 19 },
-  gameStatusWarning: { color: "#FFBF69" },
-  fallbackText: { color: "#C5CAE9", fontSize: 12, lineHeight: 18 },
-  apkNotice: { color: "#9FA8FF", fontSize: 12, lineHeight: 18, marginTop: 4 },
+  title: { color: Palette.white, fontSize: 24, fontWeight: "800" },
+  subtitle: { color: Palette.textSecondary, fontSize: 13, marginTop: 4 },
+  refreshButton: { backgroundColor: Palette.navy500, borderRadius: 10, minWidth: 92, minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, alignItems: "center", justifyContent: "center" },
+  refreshText: { color: Palette.white, fontSize: 12, fontWeight: "800" },
+  summaryCard: { backgroundColor: Palette.navy900, borderRadius: 18, padding: 16, gap: 6 },
+  summaryTitle: { color: Palette.white, fontSize: 18, fontWeight: "800" },
+  summaryLine: { color: Palette.textSoft, fontSize: 13 },
+  gameStatus: { color: Palette.success, fontSize: 13, fontWeight: "700", marginTop: 6, lineHeight: 19 },
+  gameStatusWarning: { color: Palette.warning },
+  fallbackText: { color: Palette.textSoft, fontSize: 12, lineHeight: 18 },
+  apkNotice: { color: Palette.textSecondary, fontSize: 12, lineHeight: 18, marginTop: 4 },
   category: { gap: 8 },
-  categoryTitle: { color: "#9FA8DA", fontSize: 12, fontWeight: "800", letterSpacing: 1.1 },
-  card: { backgroundColor: "#1A1A2E", borderRadius: 16, overflow: "hidden" },
-  sensorRow: { flexDirection: "row", padding: 14, gap: 10, borderBottomColor: "#292B46", borderBottomWidth: StyleSheet.hairlineWidth },
+  categoryTitle: { color: Palette.textSecondary, fontSize: 12, fontWeight: "800", letterSpacing: 1.1 },
+  card: { backgroundColor: Palette.navy900, borderRadius: 16, overflow: "hidden" },
+  sensorRow: { flexDirection: "row", padding: 14, gap: 10, borderBottomColor: Palette.navy700, borderBottomWidth: StyleSheet.hairlineWidth },
   sensorIcon: { fontSize: 16, width: 24 },
   sensorContent: { flex: 1, gap: 2 },
   sensorTitleRow: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 8 },
-  sensorName: { color: "#FFFFFF", fontSize: 14, fontWeight: "700", flex: 1 },
-  sensorValue: { color: "#80CBC4", fontSize: 12, fontWeight: "700", flexShrink: 1, textAlign: "right" },
+  sensorName: { color: Palette.white, fontSize: 14, fontWeight: "700", flex: 1 },
+  sensorValue: { color: Palette.success, fontSize: 12, fontWeight: "700", flexShrink: 1, textAlign: "right" },
   sensorStatus: { fontSize: 12, fontWeight: "700" },
-  sensorPurpose: { color: "#AAB2CF", fontSize: 11, lineHeight: 16 },
-  sensorDetails: { color: "#7982A2", fontSize: 10 },
-  explanationCard: { backgroundColor: "#162F33", borderRadius: 16, padding: 15, gap: 5 },
-  explanationTitle: { color: "#80CBC4", fontSize: 14, fontWeight: "800" },
-  explanationText: { color: "#D5E8E6", fontSize: 12, lineHeight: 18 },
+  sensorPurpose: { color: Palette.textSecondary, fontSize: 11, lineHeight: 16 },
+  sensorDetails: { color: Palette.textMuted, fontSize: 10 },
+  explanationCard: { backgroundColor: Palette.navy800, borderRadius: 16, padding: 15, gap: 5 },
+  explanationTitle: { color: Palette.success, fontSize: 14, fontWeight: "800" },
+  explanationText: { color: Palette.textSoft, fontSize: 12, lineHeight: 18 },
 });

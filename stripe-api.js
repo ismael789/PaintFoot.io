@@ -6,10 +6,27 @@ require("dotenv").config();
 
 const Stripe = require("stripe");
 const { shieldServerStore, MAX_SHIELD_DURATION_HOURS } = require("./shield-server-store");
+const { getSupabaseShieldCatalog } = require("./supabase-shield-catalog");
+const {
+  getPlayerShieldPurchases,
+  markPurchasedShieldActivated,
+  saveVerifiedShieldPurchase,
+} = require("./supabase-shield-purchases");
+const {
+  sendPaymentApprovedPush,
+  sendPaymentStatusPush,
+} = require("./payment-push");
 
 const DEFAULT_PORT = 4000;
 const MAX_PORT_ATTEMPTS = 20;
 const MAX_BODY_BYTES = 128 * 1024;
+const DEFAULT_SHIELD_PRICE_CENTS_MXN = Object.freeze({
+  1: 1000,
+  6: 3500,
+  12: 5900,
+  24: 9900,
+  36: 12900,
+});
 const SHIELD_PRODUCTS = [1, 6, 12, 24, 36].map((durationHours) => ({
   id: `shield_${durationHours}h`,
   durationHours,
@@ -21,7 +38,10 @@ function shieldProductsConfiguration() {
   return SHIELD_PRODUCTS.map((product) => {
     const priceId = String(process.env[product.environmentVariable] || "").trim();
     const configuredAmount = Number(
-      process.env[product.amountEnvironmentVariable] || process.env.STRIPE_DEFAULT_AMOUNT_CENTS || 0,
+      process.env[product.amountEnvironmentVariable] ||
+        DEFAULT_SHIELD_PRICE_CENTS_MXN[product.durationHours] ||
+        process.env.STRIPE_DEFAULT_AMOUNT_CENTS ||
+        0,
     );
     return {
       ...product,
@@ -36,6 +56,17 @@ function shieldProductsConfiguration() {
 
 function findShieldProduct(productId) {
   return shieldProductsConfiguration().find((product) => product.id === productId) || null;
+}
+
+async function configuredShieldProducts() {
+  const databaseProducts = await getSupabaseShieldCatalog();
+  if (!databaseProducts) return shieldProductsConfiguration();
+  const configuredCurrency = normalizeCurrency(process.env.STRIPE_CURRENCY || "mxn");
+  return databaseProducts.filter((product) => product.currency === configuredCurrency);
+}
+
+async function findConfiguredShieldProduct(productId) {
+  return (await configuredShieldProducts()).find((product) => product.id === productId) || null;
 }
 
 function normalizeCurrency(value = "mxn") {
@@ -96,6 +127,18 @@ function validateRedirectUrl(value, variableName) {
     throw new Error(`${variableName} utiliza un protocolo no permitido`);
   }
   return value;
+}
+
+function validateAppReturnUrl(value) {
+  if (typeof value !== "string" || value.length > 1200) return null;
+  try {
+    const url = new URL(value);
+    return ["paintfootio:", "paintfoot:", "exp:", "exps:"].includes(url.protocol)
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function stripeConfiguration() {
@@ -190,7 +233,28 @@ function sendHtml(response, request, statusCode, html) {
   response.end(html);
 }
 
-function checkoutReturnUrls(request, configuration) {
+function requestReturnBaseUrl(request) {
+  const host = request.headers.host;
+  if (typeof host !== "string" || !/^[A-Za-z0-9.:[\]-]+$/.test(host)) {
+    const error = new Error("No se pudo determinar la URL publica de retorno");
+    error.statusCode = 503;
+    throw error;
+  }
+  const forwardedProtocol = request.headers["x-forwarded-proto"];
+  const protocol = forwardedProtocol === "https" ? "https" : "http";
+  return `${protocol}://${host}/api/stripe/return`;
+}
+
+function checkoutReturnUrls(request, configuration, requestedAppReturnUrl = null) {
+  const appReturnUrl = validateAppReturnUrl(requestedAppReturnUrl);
+  if (appReturnUrl) {
+    const baseUrl = requestReturnBaseUrl(request);
+    const encodedReturn = encodeURIComponent(appReturnUrl);
+    return {
+      successUrl: `${baseUrl}?result=success&session_id={CHECKOUT_SESSION_ID}&app_return=${encodedReturn}`,
+      cancelUrl: `${baseUrl}?result=cancel&app_return=${encodedReturn}`,
+    };
+  }
   if (configuration.successUrl && configuration.cancelUrl) {
     return {
       successUrl: validateRedirectUrl(
@@ -204,15 +268,7 @@ function checkoutReturnUrls(request, configuration) {
     };
   }
 
-  const host = request.headers.host;
-  if (typeof host !== "string" || !/^[A-Za-z0-9.:[\]-]+$/.test(host)) {
-    const error = new Error("No se pudo determinar la URL publica de retorno");
-    error.statusCode = 503;
-    throw error;
-  }
-  const forwardedProtocol = request.headers["x-forwarded-proto"];
-  const protocol = forwardedProtocol === "https" ? "https" : "http";
-  const baseUrl = `${protocol}://${host}/api/stripe/return`;
+  const baseUrl = requestReturnBaseUrl(request);
   return {
     successUrl: `${baseUrl}?result=success&session_id={CHECKOUT_SESSION_ID}`,
     cancelUrl: `${baseUrl}?result=cancel`,
@@ -338,7 +394,7 @@ async function handleShieldProducts(request, response) {
   const stripe = getStripeClient();
   const configuration = stripeConfiguration();
   const products = await Promise.all(
-    shieldProductsConfiguration().map(async (product) => {
+    (await configuredShieldProducts()).map(async (product) => {
       if (!product.priceId) {
         const configured = product.inlineUnitAmount != null;
         return {
@@ -420,13 +476,29 @@ function handleShieldStatus(request, response, url) {
   sendJson(response, request, 200, shieldStatusResponse(shieldServerStore.getStatus(identity.territoryId, identity.playerId)));
 }
 
-function handlePlayerShieldStatus(request, response, url) {
+async function handlePlayerShieldStatus(request, response, url) {
   const playerId = (url.searchParams.get("player_id") || "").trim();
+  const persisted = await getPlayerShieldPurchases(playerId);
+  for (const item of persisted?.inventory || []) {
+    shieldServerStore.storePurchasedShield({
+      playerId,
+      durationHours: item.durationHours,
+      productId: item.productId,
+      paymentId: item.id,
+      amount: item.amount,
+      currency: item.currency,
+      stripeMode: item.stripeMode,
+      now: item.purchasedAt,
+    });
+  }
   sendJson(
     response,
     request,
     200,
-    shieldServerStore.getPlayerStatus(playerId),
+    {
+      ...shieldServerStore.getPlayerStatus(playerId),
+      purchase_history: persisted?.history || [],
+    },
   );
 }
 
@@ -439,7 +511,9 @@ async function handleFreeShield(request, response) {
 async function handleShieldCheckout(request, response) {
   const body = await readJsonBody(request);
   const identity = validatedOptionalTerritoryIdentity(body);
-  const product = findShieldProduct(typeof body.product_id === "string" ? body.product_id : "");
+  const product = await findConfiguredShieldProduct(
+    typeof body.product_id === "string" ? body.product_id : "",
+  );
   const purchaseReference = typeof body.purchase_reference === "string" ? body.purchase_reference.trim() : "";
   if (!product || (!product.priceId && product.inlineUnitAmount == null) ||
       product.durationHours > MAX_SHIELD_DURATION_HOURS) {
@@ -465,7 +539,11 @@ async function handleShieldCheckout(request, response) {
       return;
     }
   }
-  const { successUrl, cancelUrl } = checkoutReturnUrls(request, configuration);
+  const { successUrl, cancelUrl } = checkoutReturnUrls(
+    request,
+    configuration,
+    body.return_url,
+  );
   const metadata = {
     purchase_type: "territory_shield",
     product_id: product.id,
@@ -505,7 +583,7 @@ async function handleShieldCheckout(request, response) {
   sendJson(response, request, 201, checkoutResponse(session));
 }
 
-function activateShieldFromCheckoutSession(session) {
+async function activateShieldFromCheckoutSession(session) {
   const metadata = session.metadata || {};
   if (metadata.purchase_type !== "territory_shield") return null;
   if (session.payment_status !== "paid" && session.payment_status !== "no_payment_required") {
@@ -513,7 +591,7 @@ function activateShieldFromCheckoutSession(session) {
     error.statusCode = 409;
     throw error;
   }
-  const product = findShieldProduct(metadata.product_id);
+  const product = await findConfiguredShieldProduct(metadata.product_id);
   const linePrice = session.line_items?.data?.[0]?.price;
   const linePriceId = typeof linePrice === "string" ? linePrice : linePrice?.id;
   const validPrice = product?.priceId
@@ -529,26 +607,32 @@ function activateShieldFromCheckoutSession(session) {
     error.statusCode = 409;
     throw error;
   }
-  if (metadata.territory_id) {
-    return {
-      shield: shieldServerStore.activate({
-        territoryId: metadata.territory_id,
-        playerId: metadata.player_id,
-        durationHours: product.durationHours,
-        source: "stripe",
-        paymentId: session.id,
-      }),
-      purchasedShield: null,
-    };
-  }
+  const purchasedShield = shieldServerStore.storePurchasedShield({
+    playerId: metadata.player_id,
+    durationHours: product.durationHours,
+    productId: product.id,
+    paymentId: session.id,
+    amount: session.amount_total,
+    currency: session.currency,
+    stripeMode: session.livemode ? "live" : "test",
+  });
+  await saveVerifiedShieldPurchase({
+    session,
+    product,
+    territoryId: metadata.territory_id || null,
+  });
+  void sendPaymentApprovedPush({
+    playerId: metadata.player_id,
+    sessionId: session.id,
+    durationHours: product.durationHours,
+    amount: session.amount_total,
+    currency: session.currency,
+  }).catch((error) => {
+    console.warn(`[Push] No se pudo enviar la confirmacion del pago: ${error.message}`);
+  });
   return {
     shield: null,
-    purchasedShield: shieldServerStore.storePurchasedShield({
-      playerId: metadata.player_id,
-      durationHours: product.durationHours,
-      productId: product.id,
-      paymentId: session.id,
-    }),
+    purchasedShield,
   };
 }
 
@@ -568,7 +652,7 @@ async function handleShieldConfirmation(request, response) {
     sendJson(response, request, 403, { error: "La sesion no pertenece a este jugador o territorio" });
     return;
   }
-  const result = activateShieldFromCheckoutSession(session);
+  const result = await activateShieldFromCheckoutSession(session);
   sendJson(response, request, 200, {
     shield: result.shield,
     purchased_shield: result.purchasedShield,
@@ -591,6 +675,7 @@ async function handlePurchasedShieldActivation(request, response) {
     playerId: identity.playerId,
     purchasedShieldId,
   });
+  await markPurchasedShieldActivated(purchasedShieldId, identity.territoryId);
   sendJson(response, request, 200, { shield, purchased_shield_id: purchasedShieldId });
 }
 
@@ -667,17 +752,27 @@ async function handleCheckout(request, response) {
   sendJson(response, request, 201, checkoutResponse(session));
 }
 
-function handleCheckoutReturn(request, response, result) {
+function handleCheckoutReturn(request, response, result, requestedAppReturnUrl) {
   const paid = result === "success";
-  const title = paid ? "Pago enviado a Stripe" : "Pago cancelado";
+  const title = paid ? "Confirmando pago" : "Pago cancelado";
   const message = paid
-    ? "Stripe recibio el pago. Ya puedes cerrar esta ventana y volver a PaintFoot.io."
-    : "No se realizo ningun cobro. Puedes cerrar esta ventana y volver a PaintFoot.io.";
+    ? "Estamos verificando tu compra. Volviendo a PaintFoot.io..."
+    : "No se realizo ningun cobro. Volviendo a PaintFoot.io...";
+  const appReturnUrl = validateAppReturnUrl(requestedAppReturnUrl);
+  const destination = appReturnUrl
+    ? `${appReturnUrl}${appReturnUrl.includes("?") ? "&" : "?"}payment=${paid ? "success" : "cancel"}`
+    : null;
+  const encodedDestination = destination
+    ? JSON.stringify(destination).replace(/</g, "\\u003c")
+    : "null";
+  const returnLink = destination
+    ? `<a class="return" href="${destination.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}">Volver a PaintFoot.io</a>`
+    : "";
   sendHtml(
     response,
     request,
     200,
-    `<!doctype html><html lang="es"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{align-items:center;background:#101426;color:#fff;display:flex;font-family:system-ui;height:100vh;justify-content:center;margin:0}.card{background:#1a1a2e;border-radius:20px;box-sizing:border-box;max-width:430px;padding:32px;text-align:center;width:calc(100% - 32px)}h1{font-size:24px}p{color:#c5cae9;line-height:1.5}.mark{font-size:48px}</style></head><body><main class="card"><div class="mark">${paid ? "✓" : "×"}</div><h1>${title}</h1><p>${message}</p></main></body></html>`,
+    `<!doctype html><html lang="es"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{align-items:center;background:#101426;color:#fff;display:flex;font-family:system-ui;height:100vh;justify-content:center;margin:0}.card{background:#1a1a2e;border-radius:20px;box-sizing:border-box;max-width:430px;padding:32px;text-align:center;width:calc(100% - 32px)}h1{font-size:24px}p{color:#c5cae9;line-height:1.5}.mark{font-size:48px}.return{color:#8ed8ff;display:inline-block;margin-top:12px}</style></head><body><main class="card"><div class="mark">${paid ? "✓" : "×"}</div><h1>${title}</h1><p>${message}</p>${returnLink}</main><script>const destination=${encodedDestination};if(destination){setTimeout(()=>location.replace(destination),350);}</script></body></html>`,
   );
 }
 
@@ -718,7 +813,40 @@ async function handleWebhook(request, response) {
       event.data.object.id,
       { expand: ["line_items.data.price"] },
     );
-    activateShieldFromCheckoutSession(session);
+    await activateShieldFromCheckoutSession(session);
+  } else if (
+    event.type === "checkout.session.async_payment_failed" &&
+    event.data.object?.metadata?.purchase_type === "territory_shield"
+  ) {
+    void sendPaymentStatusPush({
+      playerId: event.data.object.metadata.player_id,
+      sessionId: event.data.object.id,
+      status: "rejected",
+    }).catch((error) => {
+      console.warn(`[Push] No se pudo enviar el rechazo del pago: ${error.message}`);
+    });
+  } else if (
+    event.type === "payment_intent.payment_failed" &&
+    event.data.object?.metadata?.purchase_type === "territory_shield"
+  ) {
+    void sendPaymentStatusPush({
+      playerId: event.data.object.metadata.player_id,
+      sessionId: event.data.object.id,
+      status: "rejected",
+    }).catch((error) => {
+      console.warn(`[Push] No se pudo enviar el rechazo del pago: ${error.message}`);
+    });
+  } else if (
+    event.type === "checkout.session.expired" &&
+    event.data.object?.metadata?.purchase_type === "territory_shield"
+  ) {
+    void sendPaymentStatusPush({
+      playerId: event.data.object.metadata.player_id,
+      sessionId: event.data.object.id,
+      status: "canceled",
+    }).catch((error) => {
+      console.warn(`[Push] No se pudo enviar la cancelacion del pago: ${error.message}`);
+    });
   }
   console.log(`[Stripe] Webhook verificado: ${event.type} (${event.id})`);
   sendJson(response, request, 200, {
@@ -761,7 +889,7 @@ async function handleStripeRequest(request, response) {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/stripe/shield/player-status") {
-      handlePlayerShieldStatus(request, response, url);
+      await handlePlayerShieldStatus(request, response, url);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/stripe/shield/free") {
@@ -789,7 +917,12 @@ async function handleStripeRequest(request, response) {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/stripe/return") {
-      handleCheckoutReturn(request, response, url.searchParams.get("result"));
+      handleCheckoutReturn(
+        request,
+        response,
+        url.searchParams.get("result"),
+        url.searchParams.get("app_return"),
+      );
       return;
     }
     const sessionMatch = url.pathname.match(

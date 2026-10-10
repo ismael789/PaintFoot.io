@@ -1,9 +1,11 @@
 import { ROAD_MATCHING_RULES, SENSOR_RULES } from "../config/territory";
 import type {
   ConfidenceLevel,
+  PocketState,
   RawTrackPoint,
   RoadSegment,
   SensorEvidence,
+  SensorAvailability,
   SensorSessionMetrics,
   TrackingSessionSummary,
 } from "../types/game";
@@ -31,8 +33,20 @@ export interface SensorAssistanceAnalysis {
   walkingConfidence: ConfidenceLevel;
   roadConfidence: ConfidenceLevel;
   captureConfidence: ConfidenceLevel;
+  magneticConfidence: ConfidenceLevel;
+  pocketState: PocketState;
+  sensorAvailability: SensorAvailability;
+  trackingReliability: ConfidenceLevel;
   suspiciousMovement: boolean;
 }
+
+const NO_SENSOR_AVAILABILITY: SensorAvailability = {
+  accelerometer: false,
+  compass: false,
+  deviceMotion: false,
+  gyroscope: false,
+  magnetometer: false,
+};
 
 export function angularDistanceDegrees(first: number, second: number) {
   const difference = Math.abs(((first - second + 540) % 360) - 180);
@@ -312,6 +326,18 @@ export function analyzeSensorAssistance(
   const captureScore = suspiciousMovement
     ? Math.min(0.35, (locationScore + roadScore + walkingScore) / 3)
     : (locationScore + roadScore + walkingScore) / 3;
+  const trackingReliabilityScore = suspiciousMovement
+    ? Math.min(0.35, (locationScore * 2 + roadScore + walkingScore + headingScore) / 5)
+    : (locationScore * 2 + roadScore + walkingScore + headingScore) / 5;
+  const sensorAvailability = latestEvidence?.availability
+    ? { ...latestEvidence.availability }
+    : { ...NO_SENSOR_AVAILABILITY };
+  const pocketState: PocketState = latestEvidence?.probablePocket
+    ? "in-pocket"
+    : latestEvidence?.availability.proximity ||
+        latestEvidence?.availability.lightSensor
+      ? "not-in-pocket"
+      : "unknown";
 
   return {
     compassCompatible,
@@ -331,6 +357,10 @@ export function analyzeSensorAssistance(
     walkingConfidence: confidenceLevel(walkingScore),
     roadConfidence: confidenceLevel(roadScore),
     captureConfidence: confidenceLevel(captureScore),
+    magneticConfidence: latestEvidence?.magneticConfidence ?? "low",
+    pocketState,
+    sensorAvailability,
+    trackingReliability: confidenceLevel(trackingReliabilityScore),
     suspiciousMovement,
   };
 }
@@ -367,7 +397,13 @@ export function createTrackingSessionSummary({
     descentMeters: metrics.descentMeters,
     walkingConfidence: analysis.walkingConfidence,
     movementConfidence: analysis.movementConfidence,
+    orientationConfidence: analysis.orientationConfidence,
+    magneticConfidence: analysis.magneticConfidence,
     roadConfidence: analysis.roadConfidence,
+    captureConfidence: analysis.captureConfidence,
+    trackingReliability: analysis.trackingReliability,
+    pocketState: analysis.pocketState,
+    sensorAvailability: analysis.sensorAvailability,
     suspiciousMovement: analysis.suspiciousMovement,
   };
 }

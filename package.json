@@ -47,6 +47,7 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@expo/ngrok": "^4.1.3",
     "@types/react": "~19.2.2",
     "typescript": "~6.0.3"
   },
@@ -54,7 +55,8 @@
     "start": "node start-dev.js",
     "expo-only": "expo start --port 0",
     "reset-project": "node ./scripts/reset-project.js",
-    "test:territory": "tsc -p tsconfig.tests.json && node --test --experimental-test-isolation=none .territory-test-build/tests/territory-detection.test.js .territory-test-build/tests/territory-shields.test.js .territory-test-build/tests/road-matching.test.js .territory-test-build/tests/sensor-fusion.test.js .territory-test-build/tests/sensor-metrics.test.js .territory-test-build/tests/sensor-capability-logic.test.js .territory-test-build/tests/offline-validation.test.js .territory-test-build/tests/network-endpoints.test.js .territory-test-build/tests/global-multiplayer.test.js .territory-test-build/tests/offline-simulation.test.js .territory-test-build/tests/global-feedback.test.js tests/map-rendering.test.js tests/offline-storage-architecture.test.js tests/offline-supabase-security.test.js tests/global-multiplayer-architecture.test.js tests/settings-system-status.test.js tests/offline-runtime.test.js tests/offline-continuity.test.js tests/offline-reconnection.test.js tests/offline-simulation-visibility.test.js tests/global-feedback-architecture.test.js tests/stripe-api.test.js tests/shield-server-store.test.js tests/port-fallback.test.js tests/biometric-purchase.test.js tests/shield-active-asset.test.js tests/map-shield-menu.test.js tests/mobile-responsive.test.js",
+    "test:territory": "tsc -p tsconfig.tests.json && node --test --experimental-test-isolation=none .territory-test-build/tests/territory-detection.test.js .territory-test-build/tests/territory-shields.test.js .territory-test-build/tests/road-matching.test.js .territory-test-build/tests/sensor-fusion.test.js .territory-test-build/tests/sensor-metrics.test.js .territory-test-build/tests/sensor-capability-logic.test.js .territory-test-build/tests/offline-validation.test.js .territory-test-build/tests/network-endpoints.test.js .territory-test-build/tests/global-multiplayer.test.js .territory-test-build/tests/offline-simulation.test.js .territory-test-build/tests/global-feedback.test.js .territory-test-build/tests/world-coins.test.js .territory-test-build/tests/location-stability.test.js tests/map-rendering.test.js tests/offline-storage-architecture.test.js tests/offline-supabase-security.test.js tests/global-multiplayer-architecture.test.js tests/settings-system-status.test.js tests/offline-runtime.test.js tests/offline-continuity.test.js tests/offline-reconnection.test.js tests/offline-simulation-visibility.test.js tests/global-feedback-architecture.test.js tests/sensor-runtime-architecture.test.js tests/stripe-api.test.js tests/shield-server-store.test.js tests/shield-purchase-flow.test.js tests/port-fallback.test.js tests/biometric-purchase.test.js tests/shield-active-asset.test.js tests/map-shield-menu.test.js tests/mobile-responsive.test.js tests/coin-storage-architecture.test.js tests/coin-visibility.test.js",
+    "test:push": "node --test --experimental-test-isolation=none tests/push-notifications.test.js",
     "android": "expo run:android",
     "build:apk": "npx eas-cli build --platform android --profile preview",
     "ios": "expo run:ios",

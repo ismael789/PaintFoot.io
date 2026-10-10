@@ -1,3 +1,8 @@
+import {
+  COIN_RENDER_LIMIT,
+  COIN_RENDER_RADIUS_METERS,
+} from "@/services/world-coins";
+
 // Leaflet uses DOM/SVG instead of WebGL, so it remains compatible with older
 // Android System WebView versions used by some Expo Go devices.
 export const MAP_HTML = `<!doctype html>
@@ -12,9 +17,9 @@ export const MAP_HTML = `<!doctype html>
     .offline-map { background-color: #e8edf2; background-image: linear-gradient(#cbd5df 1px, transparent 1px), linear-gradient(90deg, #cbd5df 1px, transparent 1px); background-size: 32px 32px; height: 100%; overflow: hidden; position: relative; width: 100%; }
     .offline-map svg { height: 100%; width: 100%; }
     .offline-note { background: rgba(26,26,46,.88); border-radius: 12px; color: white; font: 700 12px sans-serif; left: 50%; padding: 8px 12px; position: absolute; top: 12px; transform: translateX(-50%); white-space: nowrap; z-index: 2; }
-    .coin-marker { align-items: center; background: #FFD54A; border: 3px solid #FFF3A6; border-radius: 50%; box-shadow: 0 2px 7px rgba(78, 55, 0, .45); color: #7A5200; display: flex; font: 900 16px sans-serif; height: 30px; justify-content: center; width: 30px; }
+    .coin-marker { align-items: center; background: #FFD54A; border: 1px solid #FFF3A6; border-radius: 50%; box-shadow: 0 1px 4px rgba(78, 55, 0, .42); color: #7A5200; display: flex; font: 900 10px sans-serif; height: 18px; justify-content: center; width: 18px; }
     .coin-marker span { line-height: 1; }
-    .coin-marker { animation: coinFloat 1.35s ease-in-out infinite; z-index: 900; }
+    .leaflet-coin-pane { pointer-events: auto; z-index: 650 !important; }
     .shield-marker { align-items: center; animation: shieldPending 1.8s ease-in-out infinite; background: rgba(255,255,255,.94); border: 2px dashed #8D99AE; border-radius: 50%; box-shadow: 0 2px 8px rgba(25,35,55,.28); color: #596579; display: flex; font: 900 15px sans-serif; height: 30px; justify-content: center; width: 30px; }
     .shield-marker.active { animation: shieldPulse 1.5s ease-in-out infinite; border: 2px solid #66E3A4; color: #087443; }
     .shield-marker span { line-height: 1; }
@@ -24,7 +29,6 @@ export const MAP_HTML = `<!doctype html>
     @keyframes shieldPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(102,227,164,.55), 0 2px 8px rgba(25,35,55,.28); } 50% { box-shadow: 0 0 0 9px rgba(102,227,164,0), 0 2px 10px rgba(25,35,55,.35); } }
     @keyframes shieldSvgPulse { 0%,100% { opacity: .72; transform: scale(.9); transform-origin: center; } 50% { opacity: 1; transform: scale(1.12); transform-origin: center; } }
     @keyframes shieldSvgPending { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
-    @keyframes coinFloat { 0%,100% { margin-top: 0; } 50% { margin-top: -5px; } }
   </style>
 </head><body><div id="map"></div>
   <div id="map-failure">No se pudo iniciar el mapa. Comprueba la conexion a Internet.</div>
@@ -51,13 +55,55 @@ export const MAP_HTML = `<!doctype html>
       const svgNamespace = 'http://www.w3.org/2000/svg';
       const offlineState = { route: [], territories: [], coins: [], user: null, others: {}, userColor: '#208AEF' };
 
+      const limitCoinsAcrossRoads = (coins, limit) => {
+        const groups = new Map();
+        coins.forEach(coin => {
+          const roadId = coin.roadSegmentId || coin.id;
+          groups.set(roadId, [...(groups.get(roadId) || []), coin]);
+        });
+        const roads = [...groups.values()];
+        const selected = [];
+        let depth = 0;
+        while (selected.length < limit) {
+          let added = false;
+          roads.forEach(roadCoins => {
+            if (selected.length >= limit || !roadCoins[depth]) return;
+            selected.push(roadCoins[depth]);
+            added = true;
+          });
+          if (!added) break;
+          depth += 1;
+        }
+        return selected;
+      };
+      const offlineCoinsForViewport = () => limitCoinsAcrossRoads(offlineState.user
+        ? [...offlineState.coins]
+            .filter(coin => {
+              const latitudeMeters = (coin.latitude - offlineState.user.latitude) * 111320;
+              const longitudeMeters = (coin.longitude - offlineState.user.longitude) *
+                111320 * Math.cos(offlineState.user.latitude * Math.PI / 180);
+              return Math.hypot(latitudeMeters, longitudeMeters) <= ${COIN_RENDER_RADIUS_METERS};
+            })
+            .sort((first, second) => {
+              const firstDistance = Math.hypot(
+                first.latitude - offlineState.user.latitude,
+                first.longitude - offlineState.user.longitude
+              );
+              const secondDistance = Math.hypot(
+                second.latitude - offlineState.user.latitude,
+                second.longitude - offlineState.user.longitude
+              );
+              return firstDistance - secondDistance;
+            })
+        : offlineState.coins, ${COIN_RENDER_LIMIT});
+
       const offlineCoordinates = () => {
         const territoryPoints = offlineState.territories.flatMap(item =>
           (item.polygon?.coordinates?.[0] || []).map(point => ({ latitude: point[1], longitude: point[0] }))
         );
         return [
           ...offlineState.route,
-          ...offlineState.coins,
+          ...offlineCoinsForViewport(),
           ...territoryPoints,
           ...(offlineState.user ? [offlineState.user] : []),
           ...Object.values(offlineState.others),
@@ -149,7 +195,7 @@ export const MAP_HTML = `<!doctype html>
         };
         Object.values(offlineState.others).forEach(point => drawPlayer(point, point.color || '#FF8800', 13));
         if (offlineState.user) drawPlayer(offlineState.user, offlineState.userColor, 16);
-        offlineState.coins.forEach(coin => {
+        offlineCoinsForViewport().forEach(coin => {
           const projected = project(coin);
           const marker = document.createElementNS(svgNamespace, 'g');
           const circle = document.createElementNS(svgNamespace, 'circle');
@@ -223,6 +269,8 @@ export const MAP_HTML = `<!doctype html>
       sendToApp('map-ready', 'offline-fallback');
     } else {
       const map = L.map('map', { zoomControl: true }).setView([19.4326, -99.1332], 13);
+      map.createPane('coinPane');
+      map.getPane('coinPane').classList.add('leaflet-coin-pane');
       const tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors',
         maxZoom: 19
@@ -242,12 +290,116 @@ export const MAP_HTML = `<!doctype html>
       const territoryLayers = {};
       const shieldLayers = {};
       const coinLayers = {};
-      const coinIcon = L.divIcon({
-        className: 'coin-marker',
-        html: '<span>🪙</span>',
-        iconSize: [30, 30],
-        iconAnchor: [15, 15]
-      });
+      let allCoins = [];
+      let bottomViewportInset = 0;
+      const coinIconForZoom = (zoom) => {
+        const size = Math.max(10, Math.min(24, 32 - (zoom * 1.2)));
+        return L.divIcon({
+          className: 'coin-marker',
+          html: '<span aria-hidden="true">&#x1FA99;</span>',
+          iconSize: [size, size],
+          iconAnchor: [size / 2, size / 2]
+        });
+      };
+      const updateCoinIconSizes = () => {
+        const icon = coinIconForZoom(map.getZoom());
+        Object.values(coinLayers).forEach(layer => layer.setIcon(icon));
+      };
+      const limitCoinsAcrossRoads = (coins, limit) => {
+        const groups = new Map();
+        coins.forEach(coin => {
+          const roadId = coin.roadSegmentId || coin.id;
+          groups.set(roadId, [...(groups.get(roadId) || []), coin]);
+        });
+        const roads = [...groups.values()];
+        const selected = [];
+        let depth = 0;
+        while (selected.length < limit) {
+          let added = false;
+          roads.forEach(roadCoins => {
+            if (selected.length >= limit || !roadCoins[depth]) return;
+            selected.push(roadCoins[depth]);
+            added = true;
+          });
+          if (!added) break;
+          depth += 1;
+        }
+        return selected;
+      };
+      const metersBetween = (first, second) => {
+        const latitudeMeters = (first.lat - second.lat) * 111320;
+        const longitudeMeters = (first.lng - second.lng) *
+          111320 * Math.cos(second.lat * Math.PI / 180);
+        return Math.hypot(latitudeMeters, longitudeMeters);
+      };
+      const coinsInsideUsefulViewport = () => {
+        const bounds = map.getBounds();
+        const size = map.getSize();
+        const renderCenter = userMarker?.getLatLng() ?? map.getCenter();
+        const insideViewport = allCoins.filter(coin =>
+          bounds.contains([coin.latitude, coin.longitude]) &&
+          metersBetween(
+            { lat: coin.latitude, lng: coin.longitude },
+            renderCenter
+          ) <= ${COIN_RENDER_RADIUS_METERS}
+        ).sort((first, second) =>
+          metersBetween(
+            { lat: first.latitude, lng: first.longitude },
+            renderCenter
+          ) - metersBetween(
+            { lat: second.latitude, lng: second.longitude },
+            renderCenter
+          ) || first.id.localeCompare(second.id)
+        );
+        const safeInset = Math.min(bottomViewportInset, size.y * 0.42);
+        const usefulBottomY = Math.max(size.y * 0.58, size.y - safeInset);
+        const outsidePanel = insideViewport.filter(coin =>
+          map.latLngToContainerPoint([coin.latitude, coin.longitude]).y <= usefulBottomY
+        );
+        // Ninguna moneda del viewport se elimina: incluso las que coinciden con
+        // el panel permanecen renderizadas y reaparecen al mover el mapa.
+        const visible = insideViewport;
+        return {
+          insideViewport,
+          hiddenByPanel: Math.max(0, insideViewport.length - outsidePanel.length),
+          visible: limitCoinsAcrossRoads(visible, ${COIN_RENDER_LIMIT})
+            .slice(0, ${COIN_RENDER_LIMIT})
+        };
+      };
+      const renderVisibleCoins = () => {
+        const viewport = coinsInsideUsefulViewport();
+        const visibleCoins = viewport.visible;
+        const incomingIds = new Set(visibleCoins.map(coin => coin.id));
+        Object.keys(coinLayers).forEach(id => {
+          if (!incomingIds.has(id)) {
+            map.removeLayer(coinLayers[id]);
+            delete coinLayers[id];
+          }
+        });
+        visibleCoins.forEach(coin => {
+          if (coinLayers[coin.id]) {
+            coinLayers[coin.id].setLatLng([coin.latitude, coin.longitude]);
+            return;
+          }
+          coinLayers[coin.id] = L.marker([coin.latitude, coin.longitude], {
+            icon: coinIconForZoom(map.getZoom()),
+            pane: 'coinPane',
+            title: 'Moneda · +' + (coin.value || 1),
+            keyboard: false,
+            zIndexOffset: 1000
+          }).bindTooltip('Moneda · +' + (coin.value || 1), { direction: 'top' }).addTo(map);
+        });
+        sendToApp('coin-viewport', JSON.stringify({
+          stored: allCoins.length,
+          inViewport: viewport.insideViewport.length,
+          hiddenByPanel: viewport.hiddenByPanel,
+          rendered: visibleCoins.length,
+          bottomInset: bottomViewportInset,
+          reason: visibleCoins.length > 0
+            ? 'visible'
+            : (allCoins.length === 0 ? 'empty_catalog' : 'outside_viewport')
+        }));
+      };
 
       const playerMarkerOptions = (color) => ({
         color: '#FFFFFF',
@@ -317,6 +469,7 @@ export const MAP_HTML = `<!doctype html>
         } else {
           userMarker.setLatLng(coordinate);
         }
+        renderVisibleCoins();
         if (center) map.flyTo(coordinate, Math.max(map.getZoom(), 16), { animate: true });
       };
       window.setPlayerColor = (color) => {
@@ -384,20 +537,34 @@ export const MAP_HTML = `<!doctype html>
         routeLayer.setLatLngs([]);
       };
       window.setCoins = (coins) => {
-        Object.keys(coinLayers).forEach(id => {
-          map.removeLayer(coinLayers[id]);
-          delete coinLayers[id];
-        });
-        (coins || []).forEach(coin => {
-          coinLayers[coin.id] = L.marker([coin.latitude, coin.longitude], {
-            icon: coinIcon,
-            title: 'Moneda · +' + (coin.value || 1),
-            keyboard: false,
-            zIndexOffset: 1000
-          }).bindTooltip('Moneda · +' + (coin.value || 1), { direction: 'top' }).addTo(map);
-          coinLayers[coin.id].bringToFront();
-        });
+        allCoins = Array.isArray(coins) ? coins : [];
+        renderVisibleCoins();
       };
+      window.setMapBottomInset = inset => {
+        bottomViewportInset = Math.max(0, Math.min(map.getSize().y * 0.42, Number(inset) || 0));
+        renderVisibleCoins();
+      };
+      map.on('zoomend', () => {
+        updateCoinIconSizes();
+        renderVisibleCoins();
+      });
+      const requestCoinsForViewport = () => {
+        const center = map.getCenter();
+        const bounds = map.getBounds();
+        sendToApp('coin-region-request', JSON.stringify({
+          latitude: center.lat,
+          longitude: center.lng,
+          south: bounds.getSouth(),
+          west: bounds.getWest(),
+          north: bounds.getNorth(),
+          east: bounds.getEast()
+        }));
+      };
+      map.on('moveend', () => {
+        renderVisibleCoins();
+        requestCoinsForViewport();
+      });
+      map.on('resize', renderVisibleCoins);
       window.addTerritory = (id, coordinates, color, owner, areaM2) => {
         putTerritory(id, coordinates.map(point => [point.latitude, point.longitude]), color, owner, areaM2, 'confirmed', null);
       };
@@ -421,10 +588,18 @@ export const MAP_HTML = `<!doctype html>
           );
         });
       };
+      window.focusTerritory = (id) => {
+        const layer = territoryLayers[id];
+        if (!layer || typeof layer.getBounds !== 'function') return false;
+        map.fitBounds(layer.getBounds(), { animate: true, maxZoom: 18, padding: [28, 28] });
+        if (typeof layer.openTooltip === 'function') layer.openTooltip();
+        return true;
+      };
 
       map.whenReady(() => {
         window.mapReady = true;
         sendToApp('map-ready');
+        requestCoinsForViewport();
       });
     }
   </script>

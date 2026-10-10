@@ -1,3 +1,4 @@
+import { Palette } from "@/constants/palette";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as Location from "expo-location";
 import {
@@ -75,22 +76,22 @@ function buildMapHtml(state: OfflineSimulationState, playerColor: string) {
     state.territoryStatus === "confirmed_simulation";
   const safePlayerColor = /^#[0-9a-f]{6}$/i.test(playerColor)
     ? playerColor
-    : "#40C4FF";
+    : Palette.sky400;
   const dots = visiblePoints
     .map(
       (point, index) =>
         `<circle cx="${point.x}" cy="${point.y}" r="5" fill="${
-          index === visiblePoints.length - 1 ? "#72E6BE" : "#40C4FF"
-        }" stroke="#fff" stroke-width="2"/>`,
+          index === visiblePoints.length - 1 ? Palette.success : Palette.sky400
+        }" stroke="${Palette.white}" stroke-width="2"/>`,
     )
     .join("");
   const status = territoryStatusLabel(state.territoryStatus);
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"/>
-    <style>html,body{margin:0;background:#11182c;overflow:hidden;font-family:Arial;color:#fff}
-    svg{display:block;width:100%;height:220px}.grid{stroke:#263354;stroke-width:1}.road{stroke:#344362;stroke-width:8;fill:none;stroke-linecap:round}
+    <style>html,body{margin:0;background:${Palette.navy900};overflow:hidden;font-family:Arial;color:${Palette.white}}
+    svg{display:block;width:100%;height:220px}.grid{stroke:${Palette.navy700};stroke-width:1}.road{stroke:${Palette.navy600};stroke-width:8;fill:none;stroke-linecap:round}
     .territory{fill:${safePlayerColor};fill-opacity:.62;stroke:none}
-    .route{stroke:${shouldFill ? safePlayerColor : "#40c4ff"};stroke-width:5;fill:none;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 3px ${safePlayerColor})}
-    .label{position:absolute;left:12px;bottom:10px;background:rgba(9,14,29,.86);padding:6px 9px;border-radius:8px;font-size:11px;color:${shouldFill ? "#72e6be" : "#ffe082"}}</style></head>
+    .route{stroke:${shouldFill ? safePlayerColor : Palette.sky400};stroke-width:5;fill:none;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 3px ${safePlayerColor})}
+    .label{position:absolute;left:12px;bottom:10px;background:${Palette.overlayNavyStrong};padding:6px 9px;border-radius:8px;font-size:11px;color:${shouldFill ? Palette.success : Palette.gold}}</style></head>
     <body><svg viewBox="0 0 320 220" aria-label="Ruta simulada">
       <path class="grid" d="M0 55H320M0 110H320M0 165H320M80 0V220M160 0V220M240 0V220"/>
       <polyline class="road" points="24,196 296,196 296,36 24,36 24,196"/>
@@ -324,8 +325,8 @@ export function OfflineSimulationScreen({
                 disabled={!hasSession || busy || state.territoryStatus !== "none"}
                 value={state.cacheSufficient}
                 onValueChange={(value) => void run(() => setOfflineSimulationCache(value))}
-                trackColor={{ false: "#48506A", true: "#315E9E" }}
-                thumbColor={state.cacheSufficient ? "#40C4FF" : "#B0B7CA"}
+                trackColor={{ false: Palette.navy600, true: Palette.navy500 }}
+                thumbColor={state.cacheSufficient ? Palette.sky400 : Palette.textSecondary}
               />
             </View>
             <Text style={styles.territoryResult}>{territoryStatusLabel(state.territoryStatus)}</Text>
@@ -361,7 +362,7 @@ export function OfflineSimulationScreen({
             <Pressable disabled={busy || !hasSession} onPress={confirmReset} style={({ pressed }) => [styles.resetButton, pressed && styles.pressed, (busy || !hasSession) && styles.disabled]}>
               <Text style={styles.resetButtonText}>Reiniciar simulacion</Text>
             </Pressable>
-            {busy && <ActivityIndicator color="#40C4FF" />}
+            {busy && <ActivityIndicator color={Palette.sky400} />}
             {message && <Text style={styles.message}>{message}</Text>}
           </View>
 
@@ -433,100 +434,100 @@ export function OfflineSimulationScreen({
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#0C1020" },
-  topBar: { minHeight: 78, paddingHorizontal: 15, paddingBottom: 12, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#151B31", borderBottomWidth: 1, borderBottomColor: "#293454" },
+  screen: { flex: 1, backgroundColor: Palette.navy950 },
+  topBar: { minHeight: 78, paddingHorizontal: 15, paddingBottom: 12, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: Palette.navy900, borderBottomWidth: 1, borderBottomColor: Palette.navy700 },
   topBarCompact: { flexWrap: "wrap", justifyContent: "space-between" },
   backButton: { minWidth: 68, minHeight: 42, justifyContent: "center" },
-  backText: { color: "#72B8FF", fontSize: 14, fontWeight: "800" },
+  backText: { color: Palette.sky300, fontSize: 14, fontWeight: "800" },
   topTitleWrap: { flex: 1, alignItems: "center" },
-  brand: { color: "#40C4FF", fontSize: 12, fontWeight: "900" },
-  topTitle: { color: "#FFFFFF", fontSize: 17, fontWeight: "900" },
+  brand: { color: Palette.sky400, fontSize: 12, fontWeight: "900" },
+  topTitle: { color: Palette.white, fontSize: 17, fontWeight: "900" },
   content: { width: "100%", maxWidth: 760, alignSelf: "center", padding: 15, gap: 15 },
-  heroCard: { backgroundColor: "#171E36", borderRadius: 18, padding: 17, borderWidth: 1, borderColor: "#2B385D", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 15 },
+  heroCard: { backgroundColor: Palette.navy800, borderRadius: 18, padding: 17, borderWidth: 1, borderColor: Palette.navy700, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 15 },
   heroCardCompact: { alignItems: "flex-start", flexDirection: "column" },
   heroText: { flex: 1, minWidth: 0 },
-  eyebrow: { color: "#8C97B8", fontSize: 10, fontWeight: "900", letterSpacing: 1.2 },
-  heroStatus: { color: "#FFFFFF", fontSize: 25, fontWeight: "900", marginTop: 5 },
-  heroHelp: { color: "#9FA9C5", fontSize: 11, lineHeight: 16, marginTop: 6, maxWidth: 270 },
-  visualOnlyNotice: { backgroundColor: "#172944", borderRadius: 14, borderWidth: 1, borderColor: "#315B89", padding: 13, gap: 4 },
-  visualOnlyTitle: { color: "#72D2FF", fontSize: 13, fontWeight: "900" },
-  visualOnlyText: { color: "#B9C6DB", fontSize: 11, lineHeight: 17 },
+  eyebrow: { color: Palette.textMuted, fontSize: 10, fontWeight: "900", letterSpacing: 1.2 },
+  heroStatus: { color: Palette.white, fontSize: 25, fontWeight: "900", marginTop: 5 },
+  heroHelp: { color: Palette.textSecondary, fontSize: 11, lineHeight: 16, marginTop: 6, maxWidth: 270 },
+  visualOnlyNotice: { backgroundColor: Palette.navy800, borderRadius: 14, borderWidth: 1, borderColor: Palette.navy500, padding: 13, gap: 4 },
+  visualOnlyTitle: { color: Palette.sky300, fontSize: 13, fontWeight: "900" },
+  visualOnlyText: { color: Palette.textSoft, fontSize: 11, lineHeight: 17 },
   networkDot: { width: 19, height: 19, borderRadius: 10, borderWidth: 4 },
-  offlineDot: { backgroundColor: "#FFB74D", borderColor: "#6B4D2E" },
-  onlineDot: { backgroundColor: "#72E6BE", borderColor: "#285A4B" },
-  card: { backgroundColor: "#171E36", borderRadius: 17, padding: 15, borderWidth: 1, borderColor: "#283455", gap: 11 },
-  mapCard: { backgroundColor: "#171E36", borderRadius: 17, padding: 12, borderWidth: 1, borderColor: "#283455", gap: 10 },
-  sectionTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "900" },
-  mapFrame: { height: 220, overflow: "hidden", borderRadius: 13, backgroundColor: "#11182C" },
-  mapWebView: { flex: 1, backgroundColor: "#11182C" },
+  offlineDot: { backgroundColor: Palette.warning, borderColor: Palette.navy600 },
+  onlineDot: { backgroundColor: Palette.success, borderColor: Palette.navy500 },
+  card: { backgroundColor: Palette.navy800, borderRadius: 17, padding: 15, borderWidth: 1, borderColor: Palette.navy700, gap: 11 },
+  mapCard: { backgroundColor: Palette.navy800, borderRadius: 17, padding: 12, borderWidth: 1, borderColor: Palette.navy700, gap: 10 },
+  sectionTitle: { color: Palette.white, fontSize: 16, fontWeight: "900" },
+  mapFrame: { height: 220, overflow: "hidden", borderRadius: 13, backgroundColor: Palette.navy900 },
+  mapWebView: { flex: 1, backgroundColor: Palette.navy900 },
   metricsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  metricCard: { minWidth: 130, flexBasis: "47%", flexGrow: 1, backgroundColor: "#171E36", borderRadius: 14, padding: 13, borderWidth: 1, borderColor: "#283455" },
-  metricLabel: { color: "#8E99B9", fontSize: 11, fontWeight: "700" },
-  metricValue: { color: "#72E6BE", fontSize: 14, fontWeight: "900", marginTop: 5 },
+  metricCard: { minWidth: 130, flexBasis: "47%", flexGrow: 1, backgroundColor: Palette.navy800, borderRadius: 14, padding: 13, borderWidth: 1, borderColor: Palette.navy700 },
+  metricLabel: { color: Palette.textMuted, fontSize: 11, fontWeight: "700" },
+  metricValue: { color: Palette.success, fontSize: 14, fontWeight: "900", marginTop: 5 },
   dataRows: { gap: 10 },
   dataRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
-  dataLabel: { color: "#9EA8C4", fontSize: 12, flex: 1 },
-  dataValue: { color: "#E9ECF5", fontSize: 12, fontWeight: "800", textAlign: "right", flex: 1.35 },
-  hashValue: { color: "#80CBC4", fontFamily: "monospace", fontSize: 13, fontWeight: "900" },
+  dataLabel: { color: Palette.textSecondary, fontSize: 12, flex: 1 },
+  dataValue: { color: Palette.ice100, fontSize: 12, fontWeight: "800", textAlign: "right", flex: 1.35 },
+  hashValue: { color: Palette.success, fontFamily: "monospace", fontSize: 13, fontWeight: "900" },
   cacheRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   cacheText: { flex: 1, gap: 5 },
-  help: { color: "#8E99B9", fontSize: 11, lineHeight: 16 },
-  territoryResult: { color: "#FFE082", backgroundColor: "#24273C", borderRadius: 10, padding: 10, textAlign: "center", fontSize: 13, fontWeight: "900" },
-  fillHelp: { color: "#8E99B9", fontSize: 10, lineHeight: 15, textAlign: "center" },
-  actionsCard: { backgroundColor: "#171E36", borderRadius: 17, padding: 15, borderWidth: 1, borderColor: "#283455", gap: 10 },
-  primaryButton: { minHeight: 49, borderRadius: 12, backgroundColor: "#2867C7", alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
-  syncButton: { minHeight: 49, borderRadius: 12, backgroundColor: "#168A70", alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
-  primaryButtonText: { color: "#FFFFFF", fontSize: 14, fontWeight: "900", textAlign: "center" },
+  help: { color: Palette.textMuted, fontSize: 11, lineHeight: 16 },
+  territoryResult: { color: Palette.gold, backgroundColor: Palette.navy800, borderRadius: 10, padding: 10, textAlign: "center", fontSize: 13, fontWeight: "900" },
+  fillHelp: { color: Palette.textMuted, fontSize: 10, lineHeight: 15, textAlign: "center" },
+  actionsCard: { backgroundColor: Palette.navy800, borderRadius: 17, padding: 15, borderWidth: 1, borderColor: Palette.navy700, gap: 10 },
+  primaryButton: { minHeight: 49, borderRadius: 12, backgroundColor: Palette.navy500, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
+  syncButton: { minHeight: 49, borderRadius: 12, backgroundColor: Palette.navy500, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
+  primaryButtonText: { color: Palette.white, fontSize: 14, fontWeight: "900", textAlign: "center" },
   buttonPair: { flexDirection: "row", gap: 9 },
   buttonPairCompact: { flexDirection: "column" },
-  secondaryButton: { flex: 1, minHeight: 48, borderRadius: 12, backgroundColor: "#2B395D", alignItems: "center", justifyContent: "center", paddingHorizontal: 9 },
-  secondaryButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900", textAlign: "center" },
-  tertiaryButton: { flex: 1, minHeight: 44, borderRadius: 11, borderWidth: 1, borderColor: "#40527E", alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
-  tertiaryButtonText: { color: "#B9D8FF", fontSize: 12, fontWeight: "900", textAlign: "center" },
+  secondaryButton: { flex: 1, minHeight: 48, borderRadius: 12, backgroundColor: Palette.navy700, alignItems: "center", justifyContent: "center", paddingHorizontal: 9 },
+  secondaryButtonText: { color: Palette.white, fontSize: 12, fontWeight: "900", textAlign: "center" },
+  tertiaryButton: { flex: 1, minHeight: 44, borderRadius: 11, borderWidth: 1, borderColor: Palette.navy600, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
+  tertiaryButtonText: { color: Palette.textSoft, fontSize: 12, fontWeight: "900", textAlign: "center" },
   resetButton: { minHeight: 42, alignItems: "center", justifyContent: "center" },
-  resetButtonText: { color: "#FF8A80", fontSize: 12, fontWeight: "900" },
+  resetButtonText: { color: Palette.dangerSoft, fontSize: 12, fontWeight: "900" },
   pressed: { opacity: 0.72 },
   disabled: { opacity: 0.42 },
-  message: { color: "#FFCC80", fontSize: 12, textAlign: "center" },
+  message: { color: Palette.warning, fontSize: 12, textAlign: "center" },
   pipeline: { gap: 0 },
   pipelineItem: { minHeight: 58, flexDirection: "row", gap: 11 },
   pipelineRail: { width: 18, alignItems: "center" },
   stepDot: { width: 13, height: 13, borderRadius: 7, marginTop: 3, borderWidth: 2 },
-  stepLine: { width: 2, flex: 1, backgroundColor: "#34405F", marginVertical: 3 },
-  step_pending: { backgroundColor: "#343B51", borderColor: "#6E7897" },
-  step_active: { backgroundColor: "#40C4FF", borderColor: "#A8E7FF" },
-  step_completed: { backgroundColor: "#72E6BE", borderColor: "#B8FFE6" },
-  step_error: { backgroundColor: "#FF6B6B", borderColor: "#FFC1C1" },
+  stepLine: { width: 2, flex: 1, backgroundColor: Palette.navy700, marginVertical: 3 },
+  step_pending: { backgroundColor: Palette.navy700, borderColor: Palette.textMuted },
+  step_active: { backgroundColor: Palette.sky400, borderColor: Palette.sky200 },
+  step_completed: { backgroundColor: Palette.success, borderColor: Palette.sky200 },
+  step_error: { backgroundColor: Palette.danger, borderColor: Palette.dangerSoft },
   stepTextWrap: { flex: 1 },
-  stepLabel: { color: "#F2F4FA", fontSize: 13, fontWeight: "900" },
-  stepDetail: { color: "#8E99B9", fontSize: 11, lineHeight: 16, marginTop: 2 },
+  stepLabel: { color: Palette.ice50, fontSize: 13, fontWeight: "900" },
+  stepDetail: { color: Palette.textMuted, fontSize: 11, lineHeight: 16, marginTop: 2 },
   stepStatus: { fontSize: 10, fontWeight: "900", textTransform: "uppercase", marginTop: 2 },
-  stepText_pending: { color: "#8E99B9" },
-  stepText_active: { color: "#40C4FF" },
-  stepText_completed: { color: "#72E6BE" },
-  stepText_error: { color: "#FF8A80" },
-  logLine: { color: "#CAD0E3", fontFamily: "monospace", fontSize: 11, lineHeight: 18 },
-  mono: { color: "#80CBC4", fontFamily: "monospace", fontSize: 11, lineHeight: 18 },
-  isolationNotice: { color: "#FFE082", fontSize: 11, lineHeight: 17, marginTop: 5 },
-  evidenceCard: { backgroundColor: "#F7FAFF", borderRadius: 18, padding: 18, borderWidth: 2, borderColor: "#72B8FF", gap: 11 },
+  stepText_pending: { color: Palette.textMuted },
+  stepText_active: { color: Palette.sky400 },
+  stepText_completed: { color: Palette.success },
+  stepText_error: { color: Palette.dangerSoft },
+  logLine: { color: Palette.ice200, fontFamily: "monospace", fontSize: 11, lineHeight: 18 },
+  mono: { color: Palette.success, fontFamily: "monospace", fontSize: 11, lineHeight: 18 },
+  isolationNotice: { color: Palette.gold, fontSize: 11, lineHeight: 17, marginTop: 5 },
+  evidenceCard: { backgroundColor: Palette.ice50, borderRadius: 18, padding: 18, borderWidth: 2, borderColor: Palette.sky300, gap: 11 },
   evidenceHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  evidenceBrand: { color: "#1762A8", fontSize: 14, fontWeight: "900" },
-  evidenceTitle: { color: "#11182C", fontSize: 22, fontWeight: "900" },
-  evidenceRule: { height: 2, backgroundColor: "#D7E5F5" },
-  evidenceDate: { color: "#56627A", fontSize: 11 },
+  evidenceBrand: { color: Palette.navy500, fontSize: 14, fontWeight: "900" },
+  evidenceTitle: { color: Palette.navy900, fontSize: 22, fontWeight: "900" },
+  evidenceRule: { height: 2, backgroundColor: Palette.ice100 },
+  evidenceDate: { color: Palette.navy600, fontSize: 11 },
   evidenceRows: { gap: 7 },
-  evidenceRow: { color: "#1C2942", fontSize: 13, fontWeight: "700" },
-  evidenceFooter: { color: "#68758C", fontSize: 10, textAlign: "center", marginTop: 5 },
-  evidenceClose: { minHeight: 38, borderRadius: 10, backgroundColor: "#263B61", alignItems: "center", justifyContent: "center" },
+  evidenceRow: { color: Palette.navy800, fontSize: 13, fontWeight: "700" },
+  evidenceFooter: { color: Palette.navy600, fontSize: 10, textAlign: "center", marginTop: 5 },
+  evidenceClose: { minHeight: 38, borderRadius: 10, backgroundColor: Palette.navy700, alignItems: "center", justifyContent: "center" },
   pill: { borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5 },
-  pill_neutral: { backgroundColor: "#313950" },
-  pill_active: { backgroundColor: "#173F66" },
-  pill_good: { backgroundColor: "#D5F4E9" },
-  pill_warning: { backgroundColor: "#57451D" },
+  pill_neutral: { backgroundColor: Palette.navy700 },
+  pill_active: { backgroundColor: Palette.navy700 },
+  pill_good: { backgroundColor: Palette.sky200 },
+  pill_warning: { backgroundColor: Palette.navy700 },
   pillText: { fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },
-  pillText_neutral: { color: "#C3CAE0" },
-  pillText_active: { color: "#72D2FF" },
-  pillText_good: { color: "#126149" },
-  pillText_warning: { color: "#FFE082" },
+  pillText_neutral: { color: Palette.ice200 },
+  pillText_active: { color: Palette.sky300 },
+  pillText_good: { color: Palette.navy500 },
+  pillText_warning: { color: Palette.gold },
 });
 

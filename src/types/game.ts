@@ -34,12 +34,17 @@ export interface SensorAvailability {
 }
 
 export type ConfidenceLevel = "low" | "medium" | "high";
+export type PocketState = "unknown" | "in-pocket" | "not-in-pocket";
 export type ThemePreference = "light" | "dark" | "auto";
 export type ResolvedTheme = "light" | "dark";
 
 export interface SensorEvidence {
   timestamp: number;
   availability: SensorAvailability;
+  /** Sensores que ya entregaron al menos una lectura en la sesion actual. */
+  activeSensors?: Partial<Record<keyof SensorAvailability, boolean>>;
+  /** Ultima lectura por sensor; permite detectar una fuente detenida sin tumbar GPS. */
+  sensorReadingsAt?: Partial<Record<keyof SensorAvailability, number>>;
   compassAccuracy: number | null;
   compassHeadingDegrees: number | null;
   gyroscopeRotationRateRadS: number | null;
@@ -92,7 +97,13 @@ export interface TrackingSessionSummary {
   descentMeters: number | null;
   walkingConfidence: ConfidenceLevel;
   movementConfidence: ConfidenceLevel;
+  orientationConfidence: ConfidenceLevel;
+  magneticConfidence: ConfidenceLevel;
   roadConfidence: ConfidenceLevel;
+  captureConfidence: ConfidenceLevel;
+  trackingReliability: ConfidenceLevel;
+  pocketState: PocketState;
+  sensorAvailability: SensorAvailability;
   suspiciousMovement: boolean;
 }
 

@@ -71,6 +71,13 @@ export const SHIELD_WARNING_PERCENTAGE = 0.3;
 export const FREE_SHIELD_DURATION_HOURS = 1;
 export const FREE_SHIELD_COOLDOWN_HOURS = 24;
 export const PAID_SHIELD_DURATION_HOURS = [1, 6, 12, 24, 36] as const;
+export const SHIELD_PRICE_CENTS_MXN = {
+  1: 1_000,
+  6: 3_500,
+  12: 5_900,
+  24: 9_900,
+  36: 12_900,
+} as const;
 
 export const SHIELD_RULES = {
   maximumDurationHours: MAX_SHIELD_DURATION_HOURS,

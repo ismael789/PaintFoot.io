@@ -91,7 +91,16 @@ class ShieldServerStore {
     };
   }
 
-  storePurchasedShield({ playerId, durationHours, productId, paymentId, now = Date.now() }) {
+  storePurchasedShield({
+    playerId,
+    durationHours,
+    productId,
+    paymentId,
+    amount = null,
+    currency = null,
+    stripeMode = "test",
+    now = Date.now(),
+  }) {
     this.getPlayerStatus(playerId, now);
     if (!Number.isInteger(durationHours) || durationHours <= 0 || durationHours > MAX_SHIELD_DURATION_HOURS) {
       throw httpError("Duracion de escudo no permitida");
@@ -103,6 +112,11 @@ class ShieldServerStore {
       id: paymentId,
       durationHours,
       productId,
+      amount: Number.isInteger(amount) && amount >= 0 ? amount : null,
+      currency: typeof currency === "string" && /^[a-z]{3}$/.test(currency)
+        ? currency
+        : null,
+      stripeMode: stripeMode === "live" ? "live" : "test",
       purchasedAt: now,
     };
     const current = this.state.purchasedShields[playerId] || [];

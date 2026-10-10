@@ -26,6 +26,8 @@
     "src/services/global-multiplayer-logic.ts",
     "src/services/offline-simulation-logic.ts",
     "src/services/global-feedback.ts",
+    "src/services/world-coins.ts",
+    "src/services/location-stability.ts",
     "tests/territory-detection.test.ts",
     "tests/sensor-metrics.test.ts",
     "tests/sensor-capability-logic.test.ts",
@@ -36,6 +38,8 @@
     "tests/network-endpoints.test.ts"
     ,"tests/global-multiplayer.test.ts",
     "tests/offline-simulation.test.ts",
-    "tests/global-feedback.test.ts"
+    "tests/global-feedback.test.ts",
+    "tests/world-coins.test.ts"
+    ,"tests/location-stability.test.ts"
   ]
 }

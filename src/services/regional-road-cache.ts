@@ -6,8 +6,10 @@ import {
   saveRoadSegmentsToCache,
 } from "@/services/offline-storage";
 import type { GeoCoordinate, RoadSegment } from "@/types/game";
+import type { GeoBounds } from "@/services/world-coins";
 import { coordinateNodeId } from "@/utils/geo";
 import { debugLog } from "@/utils/debug-log";
+import bundledSlrcRoadSegments from "../../assets/data/slrc-walkable-roads.json";
 
 interface OverpassElement {
   type: "way" | string;
@@ -23,6 +25,53 @@ interface OverpassResponse {
 const refreshedAtByArea = new Map<string, number>();
 const requestsInFlight = new Map<string, Promise<void>>();
 const REFRESH_INTERVAL_MS = 15 * 60 * 1_000;
+
+export const SAN_LUIS_RIO_COLORADO_URBAN_BOUNDS: GeoBounds = {
+  south: 32.4,
+  west: -114.8334,
+  north: 32.5,
+  east: -114.7,
+};
+
+export function isInsideSanLuisRioColoradoUrbanArea(coordinate: GeoCoordinate) {
+  const bounds = SAN_LUIS_RIO_COLORADO_URBAN_BOUNDS;
+  return (
+    coordinate.latitude >= bounds.south &&
+    coordinate.latitude <= bounds.north &&
+    coordinate.longitude >= bounds.west &&
+    coordinate.longitude <= bounds.east
+  );
+}
+
+/** Real OSM streets bundled with the app so the city coin field works offline. */
+export function getBundledSanLuisRioColoradoRoadSegments(): RoadSegment[] {
+  return bundledSlrcRoadSegments as RoadSegment[];
+}
+
+/** Loads only bundled roads intersecting the requested local area. */
+export function getBundledSanLuisRioColoradoRoadSegmentsNear(
+  coordinate: GeoCoordinate,
+  radiusMeters: number,
+): RoadSegment[] {
+  const latitudePadding = radiusMeters / 111_320;
+  const longitudePadding = radiusMeters /
+    (111_320 * Math.max(0.2, Math.cos((coordinate.latitude * Math.PI) / 180)));
+  const south = coordinate.latitude - latitudePadding;
+  const north = coordinate.latitude + latitudePadding;
+  const west = coordinate.longitude - longitudePadding;
+  const east = coordinate.longitude + longitudePadding;
+  return getBundledSanLuisRioColoradoRoadSegments().filter((segment) => {
+    if (segment.coordinates.length < 2) return false;
+    const latitudes = segment.coordinates.map((point) => point.latitude);
+    const longitudes = segment.coordinates.map((point) => point.longitude);
+    return (
+      Math.max(...latitudes) >= south &&
+      Math.min(...latitudes) <= north &&
+      Math.max(...longitudes) >= west &&
+      Math.min(...longitudes) <= east
+    );
+  });
+}
 
 function overpassSegments(payload: OverpassResponse): RoadSegment[] {
   const excludedForWalking = new Set([
@@ -74,6 +123,30 @@ function overpassSegments(payload: OverpassResponse): RoadSegment[] {
   });
 }
 
+export async function fetchRoadNetworkForBounds(
+  bounds: GeoBounds,
+  fetchImplementation: typeof fetch = fetch,
+) {
+  const query = `[out:json][timeout:60];way["highway"](${bounds.south},${bounds.west},${bounds.north},${bounds.east});out tags geom;`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 75_000);
+  try {
+    const response = await fetchImplementation(REGIONAL_CACHE_CONFIG.overpassEndpoint, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      },
+      body: `data=${encodeURIComponent(query)}`,
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return overpassSegments((await response.json()) as OverpassResponse);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function segmentTouchesRegion(segment: RoadSegment, regionId: string) {
   const bounds = roadRegionBoundsFromId(regionId);
   if (!bounds) return false;
@@ -109,13 +182,21 @@ export async function prefetchRoadRegionsNear(
     const north = Math.max(...bounds.map((item) => item.maxLat));
     const east = Math.max(...bounds.map((item) => item.maxLon));
     const query = `[out:json][timeout:25];way["highway"](${south},${west},${north},${east});out tags geom;`;
-    const response = await fetchImplementation(REGIONAL_CACHE_CONFIG.overpassEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: `data=${encodeURIComponent(query)}`,
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const segments = overpassSegments((await response.json()) as OverpassResponse);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    let segments: RoadSegment[];
+    try {
+      const response = await fetchImplementation(REGIONAL_CACHE_CONFIG.overpassEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      segments = overpassSegments((await response.json()) as OverpassResponse);
+    } finally {
+      clearTimeout(timeout);
+    }
     for (const regionId of regionIds) {
       const regionalSegments = segments.filter((segment) =>
         segmentTouchesRegion(segment, regionId),

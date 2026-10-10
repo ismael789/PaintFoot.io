@@ -16,7 +16,7 @@ export interface ShieldPurchaseRecord {
   currency: string | null;
   status: ShieldPurchaseStatus;
   createdAt: number;
-  stripeMode: "test";
+  stripeMode: "test" | "live";
   sessionId?: string | null;
 }
 

@@ -1,10 +1,22 @@
 {
   "build": {
+    "apk": {
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_SUPABASE_URL": "https://xlhbsyyapsdmikaxloac.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_cCstpdbzH4C5hjfcHErvoQ_wmyfiYZp",
+        "EXPO_PUBLIC_EAS_PROJECT_ID": "983b3edc-9ac5-4acb-8b32-d8a51e084295"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
     "preview": {
       "distribution": "internal",
       "env": {
         "EXPO_PUBLIC_SUPABASE_URL": "https://xlhbsyyapsdmikaxloac.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_cCstpdbzH4C5hjfcHErvoQ_wmyfiYZp"
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_cCstpdbzH4C5hjfcHErvoQ_wmyfiYZp",
+        "EXPO_PUBLIC_EAS_PROJECT_ID": "983b3edc-9ac5-4acb-8b32-d8a51e084295"
       },
       "android": {
         "buildType": "apk"
@@ -13,7 +25,11 @@
     "production": {
       "env": {
         "EXPO_PUBLIC_SUPABASE_URL": "https://xlhbsyyapsdmikaxloac.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_cCstpdbzH4C5hjfcHErvoQ_wmyfiYZp"
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_cCstpdbzH4C5hjfcHErvoQ_wmyfiYZp",
+        "EXPO_PUBLIC_EAS_PROJECT_ID": "983b3edc-9ac5-4acb-8b32-d8a51e084295"
+      },
+      "android": {
+        "buildType": "app-bundle"
       }
     }
   }

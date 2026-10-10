@@ -38,14 +38,22 @@ export interface AndroidSensorEvent {
   near?: boolean;
 }
 
+export interface AndroidSensorAccuracyEvent {
+  id: AndroidSensorId;
+  accuracy: number;
+  timestamp: number;
+}
+
 interface NativeAndroidSensorsModule {
   getCapabilitiesAsync(): Promise<AndroidSensorCapability[]>;
   startAsync(ids: AndroidSensorId[], updateIntervalMs: number): Promise<AndroidSensorId[]>;
   stopAsync(): Promise<void>;
   getRuntimeStorageInfoAsync(): Promise<AndroidRuntimeStorageInfo>;
   addListener(
-    eventName: "onSensorChanged",
-    listener: (event: AndroidSensorEvent) => void,
+    eventName: "onSensorChanged" | "onSensorAccuracyChanged",
+    listener:
+      | ((event: AndroidSensorEvent) => void)
+      | ((event: AndroidSensorAccuracyEvent) => void),
   ): EventSubscription;
 }
 
@@ -73,9 +81,22 @@ export async function startAndroidSensors(
   ids: AndroidSensorId[],
   updateIntervalMs: number,
   listener: (event: AndroidSensorEvent) => void,
+  accuracyListener?: (event: AndroidSensorAccuracyEvent) => void,
 ) {
   if (!nativeModule) return null;
-  const subscription = nativeModule.addListener("onSensorChanged", listener);
+  const readingSubscription = nativeModule.addListener(
+    "onSensorChanged",
+    listener,
+  );
+  const accuracySubscription = accuracyListener
+    ? nativeModule.addListener("onSensorAccuracyChanged", accuracyListener)
+    : null;
+  const subscription = {
+    remove() {
+      readingSubscription.remove();
+      accuracySubscription?.remove();
+    },
+  };
   try {
     const activeIds = await nativeModule.startAsync(ids, updateIntervalMs);
     return { activeIds, subscription };

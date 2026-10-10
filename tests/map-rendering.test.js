@@ -22,6 +22,11 @@ test("mapa: un territorio confirmado usa borde y relleno semitransparente", () =
   assert.match(source, /item\.polygon\?\.coordinates\?\.\[0\]/);
 });
 
+test("mapa: los marcadores de monedas no llaman bringToFront", () => {
+  assert.match(source, /zIndexOffset: 1000/);
+  assert.doesNotMatch(source, /coinLayers\[coin\.id\]\.bringToFront/);
+});
+
 test("mapa offline: los territorios persistidos conservan color y transparencia", () => {
   assert.match(source, /polygon\.setAttribute\('fill', item\.playerColor \|\| item\.color/);
   assert.match(source, /polygon\.setAttribute\('fill-opacity', pending \? '0' : '0\.28'\)/);

@@ -8,6 +8,8 @@ import {
   getRoadCacheFilesSize,
   getAvailableStorageBytes,
   readRoadCacheBlock,
+  readCoinRegionBlock,
+  writeCoinRegionBlock,
   writeRoadCacheBlock,
 } from "@/services/app-file-storage";
 import {
@@ -22,9 +24,10 @@ import type {
   SensorEvidence,
   Territory,
 } from "@/types/game";
+import type { WorldCoin } from "@/services/world-coins";
 
 const DATABASE_NAME = "paintfoot-offline.db";
-const DATABASE_VERSION = 5;
+const DATABASE_VERSION = 7;
 const ROAD_CACHE_TTL_MS = REGIONAL_CACHE_CONFIG.ttlMs;
 const ROAD_CACHE_MAX_REGIONS = REGIONAL_CACHE_CONFIG.maxRegions;
 const ROAD_CACHE_MAX_BYTES = REGIONAL_CACHE_CONFIG.maxBytes;
@@ -116,7 +119,31 @@ export type SyncOperationAction =
   | "UPDATE_SESSION"
   | "UPLOAD_TRACK"
   | "SYNC_STATS"
-  | "VALIDATE_TERRITORY";
+  | "VALIDATE_TERRITORY"
+  | "COIN_COLLECTED"
+  | "COIN_REGION_GENERATED"
+  | "COIN_STATE_UPDATE";
+
+export type StoredCoinStatus = "available" | "collected" | "expired";
+export type StoredCoinSyncStatus = "local" | "pending_sync" | "synced";
+
+export interface StoredCoin extends WorldCoin {
+  status: StoredCoinStatus;
+  createdAt: number;
+  updatedAt: number;
+  collectedAt: number | null;
+  collectedBy: string | null;
+  syncStatus: StoredCoinSyncStatus;
+}
+
+export interface CoinRegionMetadata {
+  regionId: string;
+  filePath: string;
+  sizeBytes: number;
+  contentHash: string;
+  coinCount: number;
+  updatedAt: number;
+}
 
 export interface SyncQueueOperation {
   id: string;
@@ -261,6 +288,27 @@ function serializeOperation<T>(operation: () => Promise<T>) {
     () => undefined,
   );
   return result;
+}
+
+function isSQLiteBusyError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database is locked|database is busy|SQLITE_BUSY/i.test(message);
+}
+
+async function retryIdempotentSQLiteWrite<T>(operation: () => Promise<T>) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isSQLiteBusyError(error) || attempt === 3) throw error;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 75 * (attempt + 1));
+      });
+    }
+  }
+  throw lastError;
 }
 
 const ROAD_REGION_DEGREES = REGIONAL_CACHE_CONFIG.regionDegrees;
@@ -465,6 +513,7 @@ async function openDatabase() {
       .then(async (db) => {
       await db.execAsync(`
         PRAGMA journal_mode = WAL;
+        PRAGMA busy_timeout = 10000;
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS tracking_sessions (
           id TEXT PRIMARY KEY NOT NULL,
@@ -598,6 +647,43 @@ async function openDatabase() {
           updated_at INTEGER NOT NULL,
           UNIQUE(entity_type, entity_id, action)
         );
+        CREATE TABLE IF NOT EXISTS coin_regions (
+          region_id TEXT PRIMARY KEY NOT NULL,
+          file_path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          coin_count INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS coins (
+          id TEXT PRIMARY KEY NOT NULL,
+          region_id TEXT NOT NULL,
+          road_segment_id TEXT NOT NULL,
+          segment_index INTEGER NOT NULL,
+          density_version INTEGER NOT NULL DEFAULT 1,
+          latitude REAL NOT NULL,
+          longitude REAL NOT NULL,
+          value INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'available',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          collected_at INTEGER,
+          collected_by TEXT,
+          source TEXT NOT NULL DEFAULT 'osm_road',
+          content_hash TEXT NOT NULL,
+          sync_status TEXT NOT NULL DEFAULT 'local',
+          FOREIGN KEY (region_id) REFERENCES coin_regions(region_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_coins_region_status
+          ON coins(region_id, status);
+        CREATE INDEX IF NOT EXISTS idx_coins_bounds_status
+          ON coins(latitude, longitude, status);
+        CREATE TABLE IF NOT EXISTS coin_balances (
+          player_id TEXT PRIMARY KEY NOT NULL,
+          balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
+          updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS trusted_time (
           singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
           server_time INTEGER NOT NULL,
@@ -674,6 +760,16 @@ async function openDatabase() {
           );
         }
       }
+      if ((version?.user_version ?? 0) < 7) {
+        const coinColumns = await db.getAllAsync<{ name: string }>(
+          "PRAGMA table_info(coins)",
+        );
+        if (!coinColumns.some((column) => column.name === "density_version")) {
+          await db.execAsync(
+            "ALTER TABLE coins ADD COLUMN density_version INTEGER NOT NULL DEFAULT 1",
+          );
+        }
+      }
       if ((version?.user_version ?? 0) < DATABASE_VERSION) {
         await db.execAsync(`PRAGMA user_version = ${DATABASE_VERSION}`);
       }
@@ -689,6 +785,388 @@ async function openDatabase() {
 
 export async function initializeOfflineStorage() {
   await openDatabase();
+}
+
+const LOCAL_COIN_BALANCE_ID = "paintfoot-local-player";
+
+function storedCoinFromRow(row: {
+  id: string;
+  region_id: string;
+  road_segment_id: string;
+  segment_index: number;
+  density_version: number;
+  latitude: number;
+  longitude: number;
+  value: number;
+  status: StoredCoinStatus;
+  created_at: number;
+  updated_at: number;
+  collected_at: number | null;
+  collected_by: string | null;
+  source: WorldCoin["source"];
+  content_hash: string;
+  sync_status: StoredCoinSyncStatus;
+}): StoredCoin {
+  return {
+    id: row.id,
+    regionId: row.region_id,
+    roadSegmentId: row.road_segment_id,
+    segmentIndex: row.segment_index,
+    densityVersion: row.density_version ?? 1,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    value: row.value,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    collectedAt: row.collected_at,
+    collectedBy: row.collected_by,
+    source: row.source,
+    hash: row.content_hash,
+    syncStatus: row.sync_status,
+  };
+}
+
+export async function saveCoinCatalogToStorage(
+  coins: WorldCoin[],
+  userId = "",
+) {
+  if (coins.length === 0) return;
+  const grouped = new Map<string, WorldCoin[]>();
+  for (const coin of coins) {
+    const regional = grouped.get(coin.regionId) ?? [];
+    regional.push(coin);
+    grouped.set(coin.regionId, regional);
+  }
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const now = Date.now();
+    const files = new Map<string, Awaited<ReturnType<typeof writeCoinRegionBlock>>>();
+    for (const [regionId, incoming] of grouped) {
+      const previous = await db.getFirstAsync<{ content_hash: string }>(
+        "SELECT content_hash FROM coin_regions WHERE region_id = ?",
+        regionId,
+      );
+      const stored = previous
+        ? await readCoinRegionBlock(regionId, previous.content_hash)
+        : null;
+      const merged = new Map((stored ?? []).map((coin) => [coin.id, coin]));
+      incoming.forEach((coin) => merged.set(coin.id, coin));
+      grouped.set(regionId, [...merged.values()].sort((a, b) => a.id.localeCompare(b.id)));
+      files.set(regionId, await writeCoinRegionBlock(regionId, grouped.get(regionId)!));
+    }
+    await retryIdempotentSQLiteWrite(() =>
+      db.withExclusiveTransactionAsync(async (transaction) => {
+        // Las posiciones disponibles son regenerables y viven en bloques por
+        // región. SQLite conserva solo metadatos y cambios de estado, evitando
+        // miles de escrituras que compitan con el GPS en segundo plano.
+        for (const [regionId, regional] of grouped) {
+          const file = files.get(regionId)!;
+          await transaction.runAsync(
+            `INSERT INTO coin_regions
+             (region_id, file_path, size_bytes, content_hash, coin_count, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(region_id) DO UPDATE SET
+               file_path = excluded.file_path,
+               size_bytes = excluded.size_bytes,
+               content_hash = excluded.content_hash,
+               coin_count = excluded.coin_count,
+               updated_at = excluded.updated_at`,
+            regionId,
+            file.relativePath,
+            file.sizeBytes,
+            file.contentHash,
+            regional.length,
+            now,
+            now,
+          );
+          // Supabase valida lotes acotados. El hash del bloque vuelve cada lote
+          // idempotente incluso si una region se completa en varias caminatas.
+          for (let offset = 0; offset < regional.length; offset += 750) {
+            const batchIndex = Math.floor(offset / 750);
+            await enqueueSyncOperationDirect(transaction, {
+              userId,
+              entityType: "coin_region",
+              entityId: `${regionId}:${file.contentHash}:${batchIndex}`,
+              action: "COIN_REGION_GENERATED",
+              payload: { regionId, coins: regional.slice(offset, offset + 750) },
+              createdAt: now,
+            });
+          }
+        }
+      }),
+    );
+  });
+}
+
+export function getStoredCoinCatalog() {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const rows = await db.getAllAsync<any>("SELECT * FROM coins ORDER BY id");
+    const storedStates = new Map(
+      rows.map((row) => {
+        const stored = storedCoinFromRow(row);
+        return [stored.id, stored] as const;
+      }),
+    );
+    const regions = await db.getAllAsync<{
+      region_id: string;
+      content_hash: string;
+      updated_at: number;
+    }>("SELECT region_id, content_hash, updated_at FROM coin_regions ORDER BY region_id");
+    const catalog = new Map<string, StoredCoin>();
+    for (const region of regions) {
+      const fileCoins = await readCoinRegionBlock(region.region_id, region.content_hash);
+      if (!fileCoins) continue;
+      for (const coin of fileCoins) {
+        const stored = storedStates.get(coin.id);
+        catalog.set(coin.id, {
+          ...coin,
+          status: stored?.status ?? "available",
+          createdAt: stored?.createdAt ?? region.updated_at,
+          updatedAt: stored?.updatedAt ?? region.updated_at,
+          collectedAt: stored?.collectedAt ?? null,
+          collectedBy: stored?.collectedBy ?? null,
+          syncStatus: stored?.syncStatus ?? "local",
+        });
+      }
+    }
+    return [...catalog.values()].sort((first, second) => first.id.localeCompare(second.id));
+  });
+}
+
+/** Reads only the current/neighboring coin blocks instead of the whole city. */
+export function getStoredCoinCatalogForRegions(regionIds: string[]) {
+  return serializeOperation(async () => {
+    if (regionIds.length === 0) return [] as StoredCoin[];
+    const db = await openDatabase();
+    const uniqueRegionIds = [...new Set(regionIds)];
+    const placeholders = uniqueRegionIds.map(() => "?").join(",");
+    const rows = await db.getAllAsync<any>("SELECT * FROM coins ORDER BY id");
+    const storedStates = new Map(
+      rows.map((row) => {
+        const stored = storedCoinFromRow(row);
+        return [stored.id, stored] as const;
+      }),
+    );
+    const regions = await db.getAllAsync<{
+      region_id: string;
+      content_hash: string;
+      updated_at: number;
+    }>(
+      `SELECT region_id, content_hash, updated_at FROM coin_regions
+       WHERE region_id IN (${placeholders}) ORDER BY region_id`,
+      ...uniqueRegionIds,
+    );
+    const catalog = new Map<string, StoredCoin>();
+    for (const region of regions) {
+      const fileCoins = await readCoinRegionBlock(region.region_id, region.content_hash);
+      if (!fileCoins) continue;
+      for (const coin of fileCoins) {
+        const stored = storedStates.get(coin.id);
+        catalog.set(coin.id, {
+          ...coin,
+          status: stored?.status ?? "available",
+          createdAt: stored?.createdAt ?? region.updated_at,
+          updatedAt: stored?.updatedAt ?? region.updated_at,
+          collectedAt: stored?.collectedAt ?? null,
+          collectedBy: stored?.collectedBy ?? null,
+          syncStatus: stored?.syncStatus ?? "local",
+        });
+      }
+    }
+    return [...catalog.values()].sort((first, second) => first.id.localeCompare(second.id));
+  });
+}
+
+export function filterStoredAvailableCoins<T extends { id: string }>(coins: T[]) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const unavailable = new Set(
+      (await db.getAllAsync<{ id: string }>(
+        "SELECT id FROM coins WHERE status <> 'available'",
+      )).map((row) => row.id),
+    );
+    return coins.filter((coin) => !unavailable.has(coin.id));
+  });
+}
+
+export function markStoredCoinsUnavailableGlobally(coinIds: string[]) {
+  return serializeOperation(async () => {
+    if (coinIds.length === 0) return;
+    const db = await openDatabase();
+    const now = Date.now();
+    for (const coinId of coinIds) {
+      await db.runAsync(
+        `UPDATE coins SET status = 'collected', sync_status = 'synced',
+         collected_by = COALESCE(collected_by, 'global-player'), updated_at = ?
+         WHERE id = ? AND status = 'available'`,
+        now, coinId,
+      );
+    }
+  });
+}
+
+export function getStoredCoinBalance() {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const row = await db.getFirstAsync<{ balance: number }>(
+      "SELECT balance FROM coin_balances WHERE player_id = ?",
+      LOCAL_COIN_BALANCE_ID,
+    );
+    return row?.balance ?? 0;
+  });
+}
+
+export function importLegacyCoinBalance(balance: number) {
+  return serializeOperation(async () => {
+    if (!Number.isInteger(balance) || balance <= 0) return;
+    const db = await openDatabase();
+    await db.runAsync(
+      `INSERT INTO coin_balances(player_id, balance, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(player_id) DO NOTHING`,
+      LOCAL_COIN_BALANCE_ID,
+      balance,
+      Date.now(),
+    );
+  });
+}
+
+export function importLegacyCollectedCoinIds(coinIds: string[]) {
+  return serializeOperation(async () => {
+    if (coinIds.length === 0) return;
+    const db = await openDatabase();
+    const now = Date.now();
+    for (const coinId of coinIds.slice(-2_000)) {
+      await db.runAsync(
+        `UPDATE coins SET status = 'collected', sync_status = 'local', updated_at = ?
+         WHERE id = ? AND status = 'available'`,
+        now, coinId,
+      );
+    }
+  });
+}
+
+export function spendStoredCoins(amount: number) {
+  return serializeOperation(async () => {
+    if (!Number.isInteger(amount) || amount <= 0) return false;
+    const db = await openDatabase();
+    const result = await db.runAsync(
+      `UPDATE coin_balances SET balance = balance - ?, updated_at = ?
+       WHERE player_id = ? AND balance >= ?`,
+      amount,
+      Date.now(),
+      LOCAL_COIN_BALANCE_ID,
+      amount,
+    );
+    return result.changes === 1;
+  });
+}
+
+export function collectStoredCoin(coin: WorldCoin, collectedBy: string) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const now = Date.now();
+    let collected = false;
+    await db.withExclusiveTransactionAsync(async (transaction) => {
+      const current = await transaction.getFirstAsync<{ status: StoredCoinStatus }>(
+        "SELECT status FROM coins WHERE id = ?",
+        coin.id,
+      );
+      if (current?.status === "collected") return;
+      if (!current) {
+        await transaction.runAsync(
+          `INSERT OR IGNORE INTO coin_regions
+           (region_id, file_path, size_bytes, content_hash, coin_count, created_at, updated_at)
+           VALUES (?, '', 0, '', 1, ?, ?)`,
+          coin.regionId, now, now,
+        );
+        await transaction.runAsync(
+          `INSERT INTO coins
+           (id, region_id, road_segment_id, segment_index, density_version, latitude, longitude,
+            value, status, created_at, updated_at, source, content_hash, sync_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'available', ?, ?, ?, ?, 'local')`,
+          coin.id, coin.regionId, coin.roadSegmentId, coin.segmentIndex,
+          coin.densityVersion, coin.latitude, coin.longitude, coin.value,
+          now, now, coin.source, coin.hash,
+        );
+      }
+      await transaction.runAsync(
+        `UPDATE coins SET status = 'collected', collected_at = ?, collected_by = ?,
+         sync_status = 'pending_sync', updated_at = ? WHERE id = ?`,
+        now, collectedBy, now, coin.id,
+      );
+      await transaction.runAsync(
+        `INSERT INTO coin_balances(player_id, balance, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(player_id) DO UPDATE SET
+           balance = coin_balances.balance + excluded.balance,
+           updated_at = excluded.updated_at`,
+        LOCAL_COIN_BALANCE_ID, Math.max(1, Math.floor(coin.value)), now,
+      );
+      await enqueueSyncOperationDirect(transaction, {
+        userId: collectedBy,
+        entityType: "coin",
+        entityId: coin.id,
+        action: "COIN_COLLECTED",
+        payload: { coinId: coin.id, collectedAt: now },
+        createdAt: now,
+      });
+      collected = true;
+    });
+    return collected;
+  });
+}
+
+export function resolveStoredCoinCollection(
+  coinId: string,
+  awarded: boolean,
+  authoritativeBalance?: number,
+) {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const now = Date.now();
+    const coin = await db.getFirstAsync<{ value: number }>(
+      "SELECT value FROM coins WHERE id = ?",
+      coinId,
+    );
+    await db.withExclusiveTransactionAsync(async (transaction) => {
+      await transaction.runAsync(
+        "UPDATE coins SET sync_status = 'synced', updated_at = ? WHERE id = ?",
+        now, coinId,
+      );
+      if (Number.isInteger(authoritativeBalance) && authoritativeBalance! >= 0) {
+        await transaction.runAsync(
+          `INSERT INTO coin_balances(player_id, balance, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(player_id) DO UPDATE SET balance = excluded.balance, updated_at = excluded.updated_at`,
+          LOCAL_COIN_BALANCE_ID, authoritativeBalance!, now,
+        );
+      } else if (!awarded && coin) {
+        await transaction.runAsync(
+          `UPDATE coin_balances SET balance = MAX(0, balance - ?), updated_at = ?
+           WHERE player_id = ?`,
+          coin.value, now, LOCAL_COIN_BALANCE_ID,
+        );
+      }
+    });
+  });
+}
+
+export function getCoinRegionMetadata() {
+  return serializeOperation(async () => {
+    const db = await openDatabase();
+    const rows = await db.getAllAsync<{
+      region_id: string; file_path: string; size_bytes: number;
+      content_hash: string; coin_count: number; updated_at: number;
+    }>("SELECT * FROM coin_regions ORDER BY region_id");
+    return rows.map((row) => ({
+      regionId: row.region_id,
+      filePath: row.file_path,
+      sizeBytes: row.size_bytes,
+      contentHash: row.content_hash,
+      coinCount: row.coin_count,
+      updatedAt: row.updated_at,
+    } satisfies CoinRegionMetadata));
+  });
 }
 
 function sessionFromRow(row: SessionRow): OfflineTrackingSession {

@@ -77,13 +77,18 @@ test("un jugador sin territorios puede guardar un escudo comprado", (t) => {
     durationHours: 12,
     productId: "shield_12h",
     paymentId: "cs_test_inventory1",
+    amount: 5900,
+    currency: "mxn",
     now: 10_000,
   });
   assert.equal(purchased.durationHours, 12);
+  assert.equal(purchased.amount, 5900);
+  assert.equal(purchased.currency, "mxn");
   assert.equal(store.getPlayerStatus("player-without-territories").purchased_shields.length, 1);
 
   const restored = new ShieldServerStore(store.filePath);
   assert.equal(restored.getPlayerStatus("player-without-territories").purchased_shields[0].id, "cs_test_inventory1");
+  assert.equal(restored.getPlayerStatus("player-without-territories").purchased_shields[0].amount, 5900);
 });
 
 test("un escudo comprado se activa al conquistar un territorio y no se duplica", (t) => {
